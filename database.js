@@ -1,0 +1,241 @@
+// database.js
+const { createClient } = require('@supabase/supabase-js')
+
+// Service role client — full DB access, never sent to frontend
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+)
+
+// ── Accounts ──────────────────────────────────────────────────────
+
+async function createUserAccounts(userId) {
+  const { error } = await supabase.from('accounts').insert([
+    { user_id: userId, type: 'demo', balance: 10000 },
+    { user_id: userId, type: 'real', balance: 0 },
+  ])
+  if (error) throw error
+}
+
+async function getAccountsByUserId(userId) {
+  const { data, error } = await supabase
+    .from('accounts')
+    .select('*')
+    .eq('user_id', userId)
+  if (error) throw error
+  return data
+}
+
+async function getAccountByUserAndType(userId, type) {
+  const { data, error } = await supabase
+    .from('accounts')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('type', type)
+    .single()
+  if (error) throw error
+  return data
+}
+
+// Atomic balance operations using Postgres functions
+async function deductBalance(accountId, amount) {
+  const { error } = await supabase.rpc('deduct_balance', {
+    p_account_id: accountId,
+    p_amount: amount,
+  })
+  if (error) {
+    if (error.message.includes('INSUFFICIENT_BALANCE')) throw new Error('INSUFFICIENT_BALANCE')
+    throw error
+  }
+}
+
+async function addBalance(accountId, amount) {
+  const { error } = await supabase.rpc('increment_balance', {
+    p_account_id: accountId,
+    p_amount: amount,
+  })
+  if (error) throw error
+}
+
+async function updatePL(accountId, plDelta) {
+  const { error } = await supabase.rpc('update_pl', {
+    p_account_id: accountId,
+    p_delta: plDelta,
+  })
+  if (error) throw error
+}
+
+// ── Contracts ─────────────────────────────────────────────────────
+
+async function createContract(data) {
+  const { data: contract, error } = await supabase
+    .from('contracts')
+    .insert(data)
+    .select()
+    .single()
+  if (error) throw error
+  return contract
+}
+
+async function getOpenContractsByAccount(accountId) {
+  const { data, error } = await supabase
+    .from('contracts')
+    .select('*')
+    .eq('account_id', accountId)
+    .eq('status', 'open')
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return data
+}
+
+async function getContractsByAccount(accountId, { limit = 20, offset = 0 } = {}) {
+  const { data, error } = await supabase
+    .from('contracts')
+    .select('*')
+    .eq('account_id', accountId)
+    .neq('status', 'open')
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1)
+  if (error) throw error
+  return data
+}
+
+async function getContractById(contractId) {
+  const { data, error } = await supabase
+    .from('contracts')
+    .select('*')
+    .eq('id', contractId)
+    .single()
+  if (error) return null
+  return data
+}
+
+async function getOpenContractsBySymbol(symbol, currentTick) {
+  const { data, error } = await supabase
+    .from('contracts')
+    .select('*')
+    .eq('symbol', symbol)
+    .eq('status', 'open')
+    .lte('entry_tick', currentTick - 1)
+  if (error) throw error
+  return data
+}
+
+async function settleContract(contractId, { exitPrice, outcome, settledAt }) {
+  const { error } = await supabase
+    .from('contracts')
+    .update({ exit_price: exitPrice, outcome, status: 'settled', settled_at: settledAt })
+    .eq('id', contractId)
+  if (error) throw error
+}
+
+// ── Transactions ──────────────────────────────────────────────────
+
+async function createTransaction(data) {
+  const { data: tx, error } = await supabase
+    .from('transactions')
+    .insert(data)
+    .select()
+    .single()
+  if (error) throw error
+  return tx
+}
+
+async function getTransactionsByUser(userId, { limit = 20, offset = 0, type } = {}) {
+  let q = supabase
+    .from('transactions')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1)
+  if (type) q = q.eq('type', type)
+  const { data, error } = await q
+  if (error) throw error
+  return data
+}
+
+async function updateTransactionStatus(transactionId, status, reference = null) {
+  const update = { status }
+  if (reference) update.reference = reference
+  const { error } = await supabase
+    .from('transactions')
+    .update(update)
+    .eq('id', transactionId)
+  if (error) throw error
+}
+
+async function getTransactionByReference(reference) {
+  const { data, error } = await supabase
+    .from('transactions')
+    .select('*')
+    .eq('reference', reference)
+    .single()
+  if (error) return null
+  return data
+}
+
+// ── KYC ──────────────────────────────────────────────────────────
+
+async function createKycDocument(data) {
+  const { error } = await supabase.from('kyc_documents').insert(data)
+  if (error) throw error
+}
+
+async function getKycDocumentsByUser(userId) {
+  const { data, error } = await supabase
+    .from('kyc_documents')
+    .select('*')
+    .eq('user_id', userId)
+  if (error) throw error
+  return data
+}
+
+// ── Exchange rates ────────────────────────────────────────────────
+
+// database.js - replace the getExchangeRate function
+
+// ── Exchange rates ────────────────────────────────────────────────
+
+// database.js - update the getExchangeRate function
+
+async function getExchangeRate(fromCcy, toCcy) {
+  // If it's USD to KES, use the exchange module
+  if (fromCcy === 'USD' && toCcy === 'KES') {
+    const exchange = require('./exchange')
+    return exchange.getExchangeRate()
+  }
+  
+  // Generic fallback for other pairs
+  const { data } = await supabase
+    .from('exchange_rates')
+    .select('rate')
+    .eq('from_ccy', fromCcy)
+    .eq('to_ccy', toCcy)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .single()
+  return data?.rate ?? parseFloat(process.env.DEFAULT_USD_KES_RATE || '130')
+}
+
+module.exports = {
+  supabase,
+  createUserAccounts,
+  getAccountsByUserId,
+  getAccountByUserAndType,
+  deductBalance,
+  addBalance,
+  updatePL,
+  createContract,
+  getOpenContractsByAccount,
+  getContractsByAccount,
+  getContractById,
+  getOpenContractsBySymbol,
+  settleContract,
+  createTransaction,
+  getTransactionsByUser,
+  updateTransactionStatus,
+  getTransactionByReference,
+  createKycDocument,
+  getKycDocumentsByUser,
+  getExchangeRate,
+}
