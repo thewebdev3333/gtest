@@ -1,6 +1,6 @@
 // wallet.tsx
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -29,26 +29,74 @@ function WalletPage() {
   const isAuthenticated = useApp((s) => s.isAuthenticated);
   const fetchBalances = useApp((s) => s.fetchBalances);
 
+  // Define loadTransactions with useCallback to avoid stale closure
+  const loadTransactions = useCallback(async () => {
+    try {
+      const response = await getTransactions(page, 20);
+      if (response.success) {
+        setTransactions(response.data.transactions);
+      }
+    } catch (err) {
+      console.error('Failed to load transactions:', err);
+    }
+  }, [page]);
+
+  const loadWithdrawals = useCallback(async () => {
+    try {
+      const response = await getWithdrawals();
+      if (response.success) {
+        setWithdrawals(response.data.withdrawals);
+      }
+    } catch (err) {
+      console.error('Failed to load withdrawals:', err);
+    }
+  }, []);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    try {
+      await Promise.all([
+        fetchBalances(),
+        loadTransactions(),
+        loadWithdrawals(),
+      ]);
+    } catch (err) {
+      console.error('Failed to load wallet data:', err);
+    } finally {
+      setLoading(false);
+    }
+  }, [fetchBalances, loadTransactions, loadWithdrawals]);
+
+  // Initial load
   useEffect(() => {
     if (isAuthenticated) {
       loadData();
     }
-  }, [isAuthenticated, page]);
+  }, [isAuthenticated, loadData]);
 
-  // ✅ NEW: Subscribe to WebSocket transaction updates
+  // Subscribe to WebSocket transaction updates
   useEffect(() => {
     if (!isAuthenticated) return;
 
     const ws = useApp.getState().ws;
     if (!ws) {
-      console.log('[Wallet] No WebSocket connection available, will retry later');
+      console.log('[Wallet] No WebSocket connection available');
       return;
     }
 
     const handler = (data: any) => {
       console.log('[Wallet] Transaction update received:', data);
       
-      // Reload transactions when status reaches a terminal state
+      // ✅ FIX: Patch the specific row immediately from WS data
+      setTransactions(prev =>
+        prev.map(tx =>
+          tx.id === data.transactionId
+            ? { ...tx, status: data.status }
+            : tx
+        )
+      );
+
+      // Then re-fetch to get a fresh authoritative list
       if (data.status === 'completed' || data.status === 'failed') {
         console.log('[Wallet] Reloading transactions due to status:', data.status);
         loadTransactions();
@@ -64,44 +112,7 @@ function WalletPage() {
       ws.off('transaction_updated', handler);
       console.log('[Wallet] Unsubscribed from transaction_updated events');
     };
-  }, [isAuthenticated]);
-
-  const loadData = async () => {
-    setLoading(true);
-    try {
-      await Promise.all([
-        fetchBalances(),
-        loadTransactions(),
-        loadWithdrawals(),
-      ]);
-    } catch (err) {
-      console.error('Failed to load wallet data:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadTransactions = async () => {
-    try {
-      const response = await getTransactions(page, 20);
-      if (response.success) {
-        setTransactions(response.data.transactions);
-      }
-    } catch (err) {
-      console.error('Failed to load transactions:', err);
-    }
-  };
-
-  const loadWithdrawals = async () => {
-    try {
-      const response = await getWithdrawals();
-      if (response.success) {
-        setWithdrawals(response.data.withdrawals);
-      }
-    } catch (err) {
-      console.error('Failed to load withdrawals:', err);
-    }
-  };
+  }, [isAuthenticated, loadTransactions, fetchBalances]);
 
   const getTransactionStatusColor = (status: string) => {
     switch (status) {
