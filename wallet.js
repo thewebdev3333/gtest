@@ -10,18 +10,35 @@ let wssInstance = null
 
 function setWebSocketServer(wss) {
   wssInstance = wss
+  console.log('[Wallet] WebSocket server set for broadcasting')
 }
 
 // Helper to broadcast to a specific user
 function broadcastToUser(userId, message) {
-  if (!wssInstance) return
+  if (!wssInstance) {
+    console.warn('[Wallet] No WebSocket server instance available')
+    return
+  }
   
-  // Find all connections for this user
+  if (!userId) {
+    console.warn('[Wallet] No userId provided for broadcast')
+    return
+  }
+  
+  let broadcastCount = 0
+  
   for (const client of wssInstance.clients) {
     if (client.readyState === 1 && client.userId === userId) {
-      client.send(JSON.stringify(message))
+      try {
+        client.send(JSON.stringify(message))
+        broadcastCount++
+      } catch (err) {
+        console.error('[Wallet] Failed to send to client:', err)
+      }
     }
   }
+  
+  console.log(`[Wallet] Broadcast to user ${userId}: ${message.event || message.type} (sent to ${broadcastCount} connections)`)
 }
 
 // Ensure upload directory exists
@@ -44,28 +61,22 @@ const PALPLUSS_BASIC_AUTH_TOKEN = process.env.PALPLUSS_BASIC_AUTH_TOKEN
 function formatPhoneNumber(phone) {
   let cleaned = phone.replace(/\s/g, '')
   
-  // Remove leading +
   if (cleaned.startsWith('+')) {
     cleaned = cleaned.substring(1)
   }
   
-  // If it starts with 0, replace with 254
   if (cleaned.startsWith('0')) {
     cleaned = '254' + cleaned.substring(1)
   }
   
-  // If it starts with 1 (and not already 254), assume it's a local number starting with 1
   if (cleaned.startsWith('1') && !cleaned.startsWith('2541')) {
     cleaned = '254' + cleaned
   }
   
-  // If it starts with 7 (and not already 254), assume it's a local number starting with 7
   if (cleaned.startsWith('7') && !cleaned.startsWith('2547')) {
     cleaned = '254' + cleaned
   }
   
-  // Validate: must be 254 + 9 digits (total 12)
-  // Kenyan numbers: 2547XXXXXXXX or 2541XXXXXXXX
   if (!/^254[17]\d{8}$/.test(cleaned)) {
     return null
   }
@@ -73,9 +84,6 @@ function formatPhoneNumber(phone) {
   return cleaned
 }
 
-/**
- * Get PalPluss Authorization Header
- */
 function getAuthHeader() {
   if (PALPLUSS_BASIC_AUTH_TOKEN) {
     return 'Basic ' + PALPLUSS_BASIC_AUTH_TOKEN
@@ -139,9 +147,6 @@ async function palplussRequest(endpoint, method = 'POST', data = null) {
   }
 }
 
-/**
- * Initiate STK Push via PalPluss
- */
 async function initiateStkPush(phone, amountKES, reference, channelId = null) {
   console.log(`[PalPluss] STK Push to ${phone} for KES ${amountKES}, ref: ${reference}`)
   
@@ -171,9 +176,6 @@ async function initiateStkPush(phone, amountKES, reference, channelId = null) {
   }
 }
 
-/**
- * Check transaction status with PalPluss
- */
 async function checkTransactionStatus(transactionId) {
   return await palplussRequest(`/transactions/${transactionId}`, 'GET')
 }
@@ -241,15 +243,11 @@ async function getRateHandler(req, res, next) {
   } catch (err) { next(err) }
 }
 
-/**
- * DEPOSIT: Initiate M-Pesa deposit via STK Push
- */
 async function depositMpesa(req, res, next) {
   try {
     const { phone, amountKES } = req.body
     const userId = req.user.id
 
-    // Validate phone number
     const formattedPhone = formatPhoneNumber(phone)
     if (!formattedPhone) {
       return res.status(400).json({
@@ -259,7 +257,6 @@ async function depositMpesa(req, res, next) {
       })
     }
 
-    // Validate amount
     if (amountKES < 260) {
       return res.status(400).json({
         success: false,
@@ -268,7 +265,6 @@ async function depositMpesa(req, res, next) {
       })
     }
 
-    // Check for pending deposit (prevent duplicates)
     const { data: pending } = await db.supabase
       .from('transactions')
       .select('id, reference, created_at')
@@ -298,11 +294,9 @@ async function depositMpesa(req, res, next) {
       }
     }
 
-    // Get exchange rate
     const rate = await db.getExchangeRate('USD', 'KES')
     const amountUSD = parseFloat((amountKES / rate).toFixed(8))
 
-    // Create transaction record (pending)
     const tx = await db.createTransaction({
       user_id: userId,
       type: 'deposit',
@@ -314,7 +308,6 @@ async function depositMpesa(req, res, next) {
 
     const reference = `GWAVE_DEP_${tx.id.substring(0, 8).toUpperCase()}`
 
-    // Initiate STK Push with PalPluss
     let checkoutRequestId
     try {
       const result = await initiateStkPush(formattedPhone, Math.round(amountKES), reference)
@@ -330,10 +323,8 @@ async function depositMpesa(req, res, next) {
       })
     }
 
-    // Update transaction with PalPluss reference
     await db.updateTransactionStatus(tx.id, 'pending', checkoutRequestId)
 
-    // Store idempotency response if key provided
     if (req.idempotencyKey && req.idempotencyStore) {
       await req.idempotencyStore({
         success: true,
@@ -366,10 +357,6 @@ async function depositMpesa(req, res, next) {
   }
 }
 
-/**
- * PalPluss Webhook Callback Handler
- * Called by PalPluss when payment status changes
- */
 async function palplussCallback(req, res, next) {
   try {
     const payload = req.body
@@ -397,7 +384,6 @@ async function palplussCallback(req, res, next) {
       external_reference
     } = transaction
 
-    // Find our transaction by the PalPluss reference
     const tx = await db.getTransactionByReference(transactionId)
     
     if (!tx) {
@@ -407,11 +393,9 @@ async function palplussCallback(req, res, next) {
 
     console.log(`[PalPluss] Found transaction: ${tx.id} for user ${tx.user_id}`)
 
-    // Determine if the transaction was successful
     const isSuccess = result_code === '0' || status === 'SUCCESS'
     const isFailed = result_code !== '0' || status === 'FAILED' || status === 'CANCELLED'
 
-    // Update our transaction and credit balance
     let transactionUpdated = false
     let newStatus = tx.status
 
@@ -443,10 +427,10 @@ async function palplussCallback(req, res, next) {
       }
     }
 
-    // Broadcast transaction status update to the user's WebSocket connection
+    // ✅ FIX: Broadcast with 'event' not 'type'
     if (transactionUpdated) {
       broadcastToUser(tx.user_id, {
-        type: 'transaction_updated',
+        event: 'transaction_updated',
         transactionId: tx.id,
         status: newStatus,
         type: tx.type,
@@ -474,9 +458,6 @@ async function palplussCallback(req, res, next) {
   }
 }
 
-/**
- * MANUAL COMPLETE: For testing deposits locally
- */
 async function completeTransactionManually(req, res, next) {
   try {
     if (process.env.NODE_ENV !== 'development' && !req.isAdmin) {
@@ -522,9 +503,9 @@ async function completeTransactionManually(req, res, next) {
       console.log(`[Test] Manually completed deposit ${tx.id} - Credited ${tx.amount_usd} USD`)
     }
 
-    // Broadcast the update
+    // ✅ FIX: Broadcast with 'event' not 'type'
     broadcastToUser(tx.user_id, {
-      type: 'transaction_updated',
+      event: 'transaction_updated',
       transactionId: tx.id,
       status: 'completed',
       type: tx.type,
@@ -555,7 +536,6 @@ async function withdrawMpesa(req, res, next) {
     const { phone, amountUSD } = req.body
     const userId = req.user.id
 
-    // Validate phone
     const formattedPhone = formatPhoneNumber(phone)
     if (!formattedPhone) {
       return res.status(400).json({
