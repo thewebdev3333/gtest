@@ -1,3 +1,4 @@
+// vite.config.ts
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -25,5 +26,22 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
+    rollupOptions: {
+      external: [],
+    },
+    commonjsOptions: {
+      include: [/node_modules/],
+      transformMixedEsModules: true,
+    },
+  },
+  optimizeDeps: {
+    include: [
+      '@tanstack/react-router',
+      '@tanstack/react-query',
+      'react',
+      'react-dom',
+      'zustand',
+      'sonner',
+    ],
   },
 })
