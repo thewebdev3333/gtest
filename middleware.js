@@ -151,6 +151,34 @@ function checkIdempotency() {
   }
 }
 
+/**
+ * Format phone number for validation
+ * Supports: 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX, 2541XXXXXXXX
+ */
+function isValidKenyanPhone(phone) {
+  if (!phone) return false
+  const cleaned = phone.replace(/\s/g, '')
+  // Accept: 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX, 2541XXXXXXXX
+  // Also: 7XXXXXXXX, 1XXXXXXXX (without leading 0)
+  const patterns = [
+    /^07\d{8}$/,           // 0712345678
+    /^01\d{8}$/,           // 0112345678
+    /^2547\d{8}$/,         // 254712345678
+    /^2541\d{8}$/,         // 254112345678
+    /^7\d{8}$/,            // 712345678
+    /^1\d{8}$/,            // 112345678
+  ]
+  return patterns.some(p => p.test(cleaned))
+}
+
+// Export the validator function for use elsewhere
+const validatePhone = (value) => {
+  if (!isValidKenyanPhone(value)) {
+    throw new Error('Phone must be in format 07XXXXXXXX or 01XXXXXXXX')
+  }
+  return true
+}
+
 const validators = {
   placeTrade: [
     body('accountType').isIn(['demo', 'real']),
@@ -164,13 +192,13 @@ const validators = {
 
   depositMpesa: [
     header('x-idempotency-key').optional().isString().isLength({ min: 10 }),
-    body('phone').matches(/^2547\d{8}$/).withMessage('Phone must be in format 2547XXXXXXXX'),
+    body('phone').custom(validatePhone),
     body('amountKES').isFloat({ min: 260 }).withMessage('Minimum deposit is KES 260 (~$2)'),
   ],
 
   withdrawMpesa: [
     header('x-idempotency-key').optional().isString().isLength({ min: 10 }),
-    body('phone').matches(/^2547\d{8}$/).withMessage('Phone must be in format 2547XXXXXXXX'),
+    body('phone').custom(validatePhone),
     body('amountUSD').isFloat({ min: 2 }).withMessage('Minimum withdrawal is $2'),
   ],
 
@@ -211,4 +239,6 @@ module.exports = {
   checkIdempotency,
   validators,
   supabaseAuth,
+  isValidKenyanPhone,
+  validatePhone,
 }

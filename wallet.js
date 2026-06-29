@@ -5,6 +5,25 @@ const path = require('path')
 const fs = require('fs')
 const { getKycStatus } = require('./auth')
 
+// Get WebSocket server reference for broadcasting
+let wssInstance = null
+
+function setWebSocketServer(wss) {
+  wssInstance = wss
+}
+
+// Helper to broadcast to a specific user
+function broadcastToUser(userId, message) {
+  if (!wssInstance) return
+  
+  // Find all connections for this user
+  for (const client of wssInstance.clients) {
+    if (client.readyState === 1 && client.userId === userId) {
+      client.send(JSON.stringify(message))
+    }
+  }
+}
+
 // Ensure upload directory exists
 const kycUploadPath = process.env.KYC_UPLOAD_PATH || './uploads/kyc'
 if (!fs.existsSync(kycUploadPath)) {
@@ -19,29 +38,58 @@ const PALPLUSS_API_SECRET = process.env.PALPLUSS_API_SECRET
 const PALPLUSS_BASIC_AUTH_TOKEN = process.env.PALPLUSS_BASIC_AUTH_TOKEN
 
 /**
+ * Validate and format Kenyan phone number
+ * Supports: 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX, 2541XXXXXXXX, +2547XXXXXXXX, +2541XXXXXXXX
+ */
+function formatPhoneNumber(phone) {
+  let cleaned = phone.replace(/\s/g, '')
+  
+  // Remove leading +
+  if (cleaned.startsWith('+')) {
+    cleaned = cleaned.substring(1)
+  }
+  
+  // If it starts with 0, replace with 254
+  if (cleaned.startsWith('0')) {
+    cleaned = '254' + cleaned.substring(1)
+  }
+  
+  // If it starts with 1 (and not already 254), assume it's a local number starting with 1
+  if (cleaned.startsWith('1') && !cleaned.startsWith('2541')) {
+    cleaned = '254' + cleaned
+  }
+  
+  // If it starts with 7 (and not already 254), assume it's a local number starting with 7
+  if (cleaned.startsWith('7') && !cleaned.startsWith('2547')) {
+    cleaned = '254' + cleaned
+  }
+  
+  // Validate: must be 254 + 9 digits (total 12)
+  // Kenyan numbers: 2547XXXXXXXX or 2541XXXXXXXX
+  if (!/^254[17]\d{8}$/.test(cleaned)) {
+    return null
+  }
+  
+  return cleaned
+}
+
+/**
  * Get PalPluss Authorization Header
- * The correct format uses the API key as the username with no password
  */
 function getAuthHeader() {
-  // Option 1: Use pre-encoded token if provided
   if (PALPLUSS_BASIC_AUTH_TOKEN) {
     return 'Basic ' + PALPLUSS_BASIC_AUTH_TOKEN
   }
   
-  // Option 2: Build from API Key (username) with no password
-  // This matches the curl example: -u "$PALPLUSS_API_KEY:"
   if (PALPLUSS_API_KEY) {
-    // The colon after the API key is required for Basic Auth with an empty password
     const credentials = `${PALPLUSS_API_KEY}:`
     const encoded = Buffer.from(credentials).toString('base64')
     return 'Basic ' + encoded
   }
   
-  // No credentials - mock mode
   return null
 }
 
-// Check if we have real credentials
 const HAS_PALPLUSS_CREDENTIALS = !!(PALPLUSS_BASIC_AUTH_TOKEN || PALPLUSS_API_KEY)
 
 console.log(`[PalPluss] Credentials: ${HAS_PALPLUSS_CREDENTIALS ? '✅ Configured' : '⚠️ Mock Mode'}`)
@@ -49,7 +97,6 @@ console.log(`[PalPluss] Credentials: ${HAS_PALPLUSS_CREDENTIALS ? '✅ Configure
 async function palplussRequest(endpoint, method = 'POST', data = null) {
   const authHeader = getAuthHeader()
   
-  // If no credentials, use mock mode
   if (!authHeader) {
     console.log(`[PalPluss MOCK] ${method} ${endpoint}`, data)
     return {
@@ -60,7 +107,6 @@ async function palplussRequest(endpoint, method = 'POST', data = null) {
     }
   }
 
-  // Real API call
   const url = `${PALPLUSS_BASE_URL}${endpoint}`
   console.log(`[PalPluss] Request URL: ${url}`)
   
@@ -93,25 +139,17 @@ async function palplussRequest(endpoint, method = 'POST', data = null) {
   }
 }
 
-// ── PalPluss Integration Functions ──────────────────────────────
-
 /**
  * Initiate STK Push via PalPluss
- * Using the correct endpoint: /payments/stk
  */
 async function initiateStkPush(phone, amountKES, reference, channelId = null) {
   console.log(`[PalPluss] STK Push to ${phone} for KES ${amountKES}, ref: ${reference}`)
   
-  // Format phone number (remove leading 0 if present)
-  let formattedPhone = phone
-  if (formattedPhone.startsWith('0')) {
-    formattedPhone = '254' + formattedPhone.substring(1)
-  }
-  if (!formattedPhone.startsWith('254')) {
-    formattedPhone = '254' + formattedPhone
+  const formattedPhone = formatPhoneNumber(phone)
+  if (!formattedPhone) {
+    throw new Error('Invalid phone number format. Use 07XXXXXXXX, 01XXXXXXXX, or 2547XXXXXXXX')
   }
   
-  // Get channel ID from env or use default
   const paymentChannelId = channelId || process.env.PALPLUSS_CHANNEL_ID || 'your-payment-channel-id'
   
   const requestData = {
@@ -211,7 +249,17 @@ async function depositMpesa(req, res, next) {
     const { phone, amountKES } = req.body
     const userId = req.user.id
 
-    // 1. Validate amount
+    // Validate phone number
+    const formattedPhone = formatPhoneNumber(phone)
+    if (!formattedPhone) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid phone number. Use 07XXXXXXXX or 01XXXXXXXX format.',
+        code: 'VALIDATION_ERROR'
+      })
+    }
+
+    // Validate amount
     if (amountKES < 260) {
       return res.status(400).json({
         success: false,
@@ -220,7 +268,7 @@ async function depositMpesa(req, res, next) {
       })
     }
 
-    // 2. Check for pending deposit (prevent duplicates)
+    // Check for pending deposit (prevent duplicates)
     const { data: pending } = await db.supabase
       .from('transactions')
       .select('id, reference, created_at')
@@ -231,7 +279,6 @@ async function depositMpesa(req, res, next) {
       .limit(1)
 
     if (pending && pending.length > 0) {
-      // Check if pending is older than 5 minutes (stale)
       const createdAt = new Date(pending[0].created_at)
       const now = new Date()
       const ageMinutes = (now - createdAt) / 60000
@@ -246,17 +293,16 @@ async function depositMpesa(req, res, next) {
           },
         })
       } else {
-        // Stale pending transaction - mark as failed and continue
         await db.updateTransactionStatus(pending[0].id, 'failed')
         console.log(`[Deposit] Stale pending transaction ${pending[0].id} marked as failed`)
       }
     }
 
-    // 3. Get exchange rate
+    // Get exchange rate
     const rate = await db.getExchangeRate('USD', 'KES')
     const amountUSD = parseFloat((amountKES / rate).toFixed(8))
 
-    // 4. Create transaction record (pending)
+    // Create transaction record (pending)
     const tx = await db.createTransaction({
       user_id: userId,
       type: 'deposit',
@@ -268,10 +314,10 @@ async function depositMpesa(req, res, next) {
 
     const reference = `GWAVE_DEP_${tx.id.substring(0, 8).toUpperCase()}`
 
-    // 5. Initiate STK Push with PalPluss
+    // Initiate STK Push with PalPluss
     let checkoutRequestId
     try {
-      const result = await initiateStkPush(phone, Math.round(amountKES), reference)
+      const result = await initiateStkPush(formattedPhone, Math.round(amountKES), reference)
       checkoutRequestId = result.checkoutRequestId || result.reference || result.id
     } catch (mpesaErr) {
       console.error('[Deposit] STK Push failed:', mpesaErr.message)
@@ -284,10 +330,10 @@ async function depositMpesa(req, res, next) {
       })
     }
 
-    // 6. Update transaction with PalPluss reference
+    // Update transaction with PalPluss reference
     await db.updateTransactionStatus(tx.id, 'pending', checkoutRequestId)
 
-    // 7. Store idempotency response if key provided
+    // Store idempotency response if key provided
     if (req.idempotencyKey && req.idempotencyStore) {
       await req.idempotencyStore({
         success: true,
@@ -298,7 +344,6 @@ async function depositMpesa(req, res, next) {
       })
     }
 
-    // 8. Return success response
     const response = {
       success: true,
       data: {
@@ -327,18 +372,15 @@ async function depositMpesa(req, res, next) {
  */
 async function palplussCallback(req, res, next) {
   try {
-    // 1. Get the webhook payload
     const payload = req.body
     console.log('[PalPluss] Webhook received:', JSON.stringify(payload, null, 2))
     
-    // 2. Extract data from PalPluss webhook format
     const { 
-      event,           // "transaction.updated"
-      event_type,      // "transaction.success" or "transaction.failed"
+      event,
+      event_type,
       transaction 
     } = payload
 
-    // 3. Validate we have the required data
     if (!transaction || !transaction.id) {
       console.warn('[PalPluss] Invalid webhook payload - missing transaction')
       return res.status(200).json({ success: true, received: true })
@@ -346,15 +388,16 @@ async function palplussCallback(req, res, next) {
 
     const { 
       id: transactionId,
-      status,          // "SUCCESS" or "FAILED"
+      status,
       amount,
       currency,
       phone_number,
-      result_code,     // "0" for success
-      result_desc      // Description of the result
+      result_code,
+      result_desc,
+      external_reference
     } = transaction
 
-    // 4. Find our transaction by the PalPluss reference
+    // Find our transaction by the PalPluss reference
     const tx = await db.getTransactionByReference(transactionId)
     
     if (!tx) {
@@ -364,14 +407,19 @@ async function palplussCallback(req, res, next) {
 
     console.log(`[PalPluss] Found transaction: ${tx.id} for user ${tx.user_id}`)
 
-    // 5. Determine if the transaction was successful
+    // Determine if the transaction was successful
     const isSuccess = result_code === '0' || status === 'SUCCESS'
     const isFailed = result_code !== '0' || status === 'FAILED' || status === 'CANCELLED'
 
-    // 6. Update our transaction and credit balance
+    // Update our transaction and credit balance
+    let transactionUpdated = false
+    let newStatus = tx.status
+
     if (isSuccess) {
       if (tx.status !== 'completed') {
         await db.updateTransactionStatus(tx.id, 'completed', transactionId)
+        newStatus = 'completed'
+        transactionUpdated = true
         console.log(`[PalPluss] Transaction ${tx.id} marked as completed`)
         
         if (tx.type === 'deposit') {
@@ -379,12 +427,12 @@ async function palplussCallback(req, res, next) {
           await db.addBalance(account.id, parseFloat(tx.amount_usd))
           console.log(`[PalPluss] Credited ${tx.amount_usd} USD to account ${account.id}`)
         }
-      } else {
-        console.log(`[PalPluss] Transaction ${tx.id} already completed, skipping`)
       }
     } else if (isFailed) {
       if (tx.status !== 'failed') {
         await db.updateTransactionStatus(tx.id, 'failed', transactionId)
+        newStatus = 'failed'
+        transactionUpdated = true
         console.log(`[PalPluss] Transaction ${tx.id} marked as failed: ${result_desc || status}`)
         
         if (tx.type === 'withdrawal') {
@@ -395,7 +443,21 @@ async function palplussCallback(req, res, next) {
       }
     }
 
-    // 7. Always return 2xx success
+    // Broadcast transaction status update to the user's WebSocket connection
+    if (transactionUpdated) {
+      broadcastToUser(tx.user_id, {
+        type: 'transaction_updated',
+        transactionId: tx.id,
+        status: newStatus,
+        type: tx.type,
+        amount_usd: parseFloat(tx.amount_usd),
+        amount_kes: tx.amount_kes,
+        reference: transactionId,
+      })
+      
+      console.log(`[PalPluss] Broadcast transaction update to user ${tx.user_id}: ${newStatus}`)
+    }
+
     res.status(200).json({ 
       success: true, 
       received: true,
@@ -460,6 +522,16 @@ async function completeTransactionManually(req, res, next) {
       console.log(`[Test] Manually completed deposit ${tx.id} - Credited ${tx.amount_usd} USD`)
     }
 
+    // Broadcast the update
+    broadcastToUser(tx.user_id, {
+      type: 'transaction_updated',
+      transactionId: tx.id,
+      status: 'completed',
+      type: tx.type,
+      amount_usd: parseFloat(tx.amount_usd),
+      amount_kes: tx.amount_kes,
+    })
+
     res.json({
       success: true,
       data: {
@@ -482,6 +554,16 @@ async function withdrawMpesa(req, res, next) {
   try {
     const { phone, amountUSD } = req.body
     const userId = req.user.id
+
+    // Validate phone
+    const formattedPhone = formatPhoneNumber(phone)
+    if (!formattedPhone) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid phone number. Use 07XXXXXXXX or 01XXXXXXXX format.',
+        code: 'VALIDATION_ERROR'
+      })
+    }
 
     const kycStatus = await getKycStatus(userId)
     if (kycStatus !== 'approved') {
@@ -544,7 +626,7 @@ async function withdrawMpesa(req, res, next) {
         user_id: userId,
         amount_usd: amountUSD,
         amount_kes: amountKES,
-        phone,
+        phone: formattedPhone,
         status: 'pending_review',
       })
       .select()
@@ -696,4 +778,7 @@ module.exports = {
   initiateStkPush,
   checkTransactionStatus,
   completeTransactionManually,
+  setWebSocketServer,
+  broadcastToUser,
+  formatPhoneNumber,
 }

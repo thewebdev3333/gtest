@@ -324,9 +324,26 @@ const wss = new WebSocketServer({
   path: '/ws'
 })
 
+// Store user ID on WebSocket connection for broadcasting
 wss.on('connection', (ws, req) => {
+  const url = new URL(req.url, 'http://localhost')
+  const token = url.searchParams.get('token')
+  
+  if (token) {
+    try {
+      const jwt = require('jsonwebtoken')
+      const payload = jwt.verify(token, process.env.SUPABASE_JWT_SECRET)
+      ws.userId = payload.sub
+    } catch {
+      // Invalid token - connection still allowed for public tick stream
+    }
+  }
+  
   market.handleWsConnection(ws, req)
 })
+
+// Set WebSocket server reference in wallet module for broadcasting
+wallet.setWebSocketServer(wss)
 
 // ── Boot sequence ──────────────────────────────────────────────────
 
