@@ -1,3 +1,4 @@
+// store.ts
 import { create } from "zustand";
 import { 
   getMe, 
@@ -344,6 +345,7 @@ export const useApp = create<AppState>((set, get) => {
             realBalance: parseFloat(response.data.real.usd),
             fxRate: response.data.rate,
           });
+          savePrefs(get());
         }
       } catch (err) {
         console.error('Failed to fetch balances:', err);
@@ -417,6 +419,28 @@ export const useApp = create<AppState>((set, get) => {
       wsInstance.on('contract_settled', (data) => {
         get().syncTrades();
         get().fetchBalances();
+      });
+
+      // NEW: Listen for transaction status updates
+      wsInstance.on('transaction_updated', (data) => {
+        console.log('[WS] Transaction updated:', data);
+        // Refresh balances and transactions when a transaction updates
+        get().fetchBalances();
+        // Show a toast notification based on status
+        const { toast } = require('sonner');
+        if (data.status === 'completed') {
+          if (data.type === 'deposit') {
+            toast.success(`Deposit of $${data.amount_usd.toFixed(2)} completed successfully!`);
+          } else if (data.type === 'withdrawal') {
+            toast.success(`Withdrawal of $${data.amount_usd.toFixed(2)} completed!`);
+          }
+        } else if (data.status === 'failed') {
+          if (data.type === 'deposit') {
+            toast.error('Deposit failed. Please try again.');
+          } else if (data.type === 'withdrawal') {
+            toast.error('Withdrawal failed. Please contact support.');
+          }
+        }
       });
       
       wsInstance.connect();
