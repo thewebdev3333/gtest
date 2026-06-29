@@ -406,17 +406,29 @@ export class MarketWebSocket {
   private listeners: Map<string, Set<(data: any) => void>> = new Map()
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private subscribedSymbols: Set<string> = new Set()
+  private token: string | undefined
+  private userId: string | null = null
 
-  constructor(private token?: string) {}
+  constructor(token?: string) {
+    this.token = token
+  }
 
   connect() {
-    const url = this.token ? `${WS_URL}?token=${this.token}` : WS_URL
+    // Build URL with token for authentication
+    let url = WS_URL
+    if (this.token) {
+      url = `${WS_URL}?token=${this.token}`
+    }
+    
+    console.log('[WS] Connecting to:', url.replace(/token=[^&]+/, 'token=***'))
     this.ws = new WebSocket(url)
 
     this.ws.onopen = () => {
       console.log('[WS] Connected')
       this.reconnectAttempts = 0
       this.emit('connected', { connected: true })
+      
+      // Re-subscribe to all symbols after reconnection
       for (const symbol of this.subscribedSymbols) {
         this.subscribe(symbol)
       }
@@ -431,10 +443,12 @@ export class MarketWebSocket {
       }
     }
 
-    this.ws.onclose = () => {
-      console.log('[WS] Disconnected')
-      this.emit('disconnected', { disconnected: true })
-      this.reconnect()
+    this.ws.onclose = (event) => {
+      console.log('[WS] Disconnected', event.code, event.reason)
+      this.emit('disconnected', { disconnected: true, code: event.code })
+      if (event.code !== 1000) {
+        this.reconnect()
+      }
     }
 
     this.ws.onerror = (error) => {
@@ -443,7 +457,10 @@ export class MarketWebSocket {
   }
 
   private handleMessage(data: any) {
-    switch (data.type) {
+    // ✅ FIX: Use 'event' first, fallback to 'type'
+    const messageType = data.event ?? data.type
+
+    switch (messageType) {
       case 'tick': {
         const frontendSymbol = mapSymbolToFrontend(data.symbol)
         const tickData = { ...data, symbol: frontendSymbol }
@@ -464,14 +481,22 @@ export class MarketWebSocket {
         break
 
       case 'contract_settled':
+        console.log('[WS] Contract settled:', data)
         this.emit('contract_settled', data)
+        break
+
+      case 'transaction_updated':
+        console.log('[WS] Transaction updated:', data)
+        this.emit('transaction_updated', data)
         break
 
       case 'error':
         console.error('[WS] Error message:', data)
+        this.emit('error', data)
         break
 
       default:
+        console.log('[WS] Unknown message type:', messageType, data)
         this.emit('message', data)
     }
   }
@@ -480,13 +505,14 @@ export class MarketWebSocket {
     if (this.reconnectTimer) return
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.log('[WS] Max reconnect attempts reached')
+      this.emit('error', { type: 'error', code: 'MAX_RECONNECT', message: 'Max reconnect attempts reached' })
       return
     }
 
     this.reconnectAttempts++
     const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 30000)
 
-    console.log(`[WS] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`)
+    console.log(`[WS] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`)
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       this.connect()
@@ -536,7 +562,16 @@ export class MarketWebSocket {
   }
 
   private emit(event: string, data: any) {
-    this.listeners.get(event)?.forEach(callback => callback(data))
+    const callbacks = this.listeners.get(event)
+    if (callbacks) {
+      for (const callback of callbacks) {
+        try {
+          callback(data)
+        } catch (err) {
+          console.error(`[WS] Error in ${event} handler:`, err)
+        }
+      }
+    }
   }
 
   disconnect() {
@@ -545,10 +580,13 @@ export class MarketWebSocket {
       this.reconnectTimer = null
     }
     if (this.ws) {
-      this.ws.close()
+      if (this.ws.readyState === WebSocket.OPEN) {
+        this.ws.close(1000, 'Disconnected by client')
+      }
       this.ws = null
     }
     this.subscribedSymbols.clear()
+    console.log('[WS] Disconnected by client')
   }
 
   isConnected(): boolean {

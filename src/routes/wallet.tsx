@@ -1,3 +1,4 @@
+// wallet.tsx
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, useEffect } from "react";
 import { AppShell } from "@/components/layout/AppShell";
@@ -33,6 +34,37 @@ function WalletPage() {
       loadData();
     }
   }, [isAuthenticated, page]);
+
+  // ✅ NEW: Subscribe to WebSocket transaction updates
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const ws = useApp.getState().ws;
+    if (!ws) {
+      console.log('[Wallet] No WebSocket connection available, will retry later');
+      return;
+    }
+
+    const handler = (data: any) => {
+      console.log('[Wallet] Transaction update received:', data);
+      
+      // Reload transactions when status reaches a terminal state
+      if (data.status === 'completed' || data.status === 'failed') {
+        console.log('[Wallet] Reloading transactions due to status:', data.status);
+        loadTransactions();
+        // Also refresh balances to be safe
+        fetchBalances();
+      }
+    };
+
+    ws.on('transaction_updated', handler);
+    console.log('[Wallet] Subscribed to transaction_updated events');
+
+    return () => {
+      ws.off('transaction_updated', handler);
+      console.log('[Wallet] Unsubscribed from transaction_updated events');
+    };
+  }, [isAuthenticated]);
 
   const loadData = async () => {
     setLoading(true);
