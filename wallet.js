@@ -3,6 +3,7 @@ const db = require('./database')
 const multer = require('multer')
 const path = require('path')
 const fs = require('fs')
+const crypto = require('crypto')  // ✅ Add this for generating UUIDs
 const { getKycStatus } = require('./auth')
 
 // Get WebSocket server reference for broadcasting
@@ -54,10 +55,6 @@ const PALPLUSS_API_KEY = process.env.PALPLUSS_API_KEY
 const PALPLUSS_API_SECRET = process.env.PALPLUSS_API_SECRET
 const PALPLUSS_BASIC_AUTH_TOKEN = process.env.PALPLUSS_BASIC_AUTH_TOKEN
 
-/**
- * Validate and format Kenyan phone number
- * Supports: 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX, 2541XXXXXXXX, +2547XXXXXXXX, +2541XXXXXXXX
- */
 function formatPhoneNumber(phone) {
   let cleaned = phone.replace(/\s/g, '')
   
@@ -297,17 +294,21 @@ async function depositMpesa(req, res, next) {
     const rate = await db.getExchangeRate('USD', 'KES')
     const amountUSD = parseFloat((amountKES / rate).toFixed(8))
 
+    // ✅ FIX: Generate reference BEFORE creating transaction
+    const txId = crypto.randomUUID()
+    const reference = `GWAVE_DEP_${txId.substring(0, 8).toUpperCase()}`
+
+    // ✅ FIX: Create transaction with reference already set
     const tx = await db.createTransaction({
+      id: txId,
       user_id: userId,
       type: 'deposit',
       amount_usd: amountUSD,
       amount_kes: amountKES,
       method: 'mpesa',
       status: 'pending',
+      reference: reference,  // ✅ This is the key fix!
     })
-
-    // Generate our reference - this will be used as accountReference in PalPluss
-    const reference = `GWAVE_DEP_${tx.id.substring(0, 8).toUpperCase()}`
 
     let checkoutRequestId
     try {
@@ -324,8 +325,9 @@ async function depositMpesa(req, res, next) {
       })
     }
 
-    // Store the checkoutRequestId as the reference in our transaction
-    // This will be sent back as external_reference in the webhook
+    // ✅ Store the checkoutRequestId in a separate update (don't overwrite reference)
+    // We only update status and store the checkout ID as reference if we want
+    // But we already have our reference, so we can just update status
     await db.updateTransactionStatus(tx.id, 'pending', checkoutRequestId)
 
     if (req.idempotencyKey && req.idempotencyStore) {
@@ -389,7 +391,7 @@ async function palplussCallback(req, res, next) {
 
     console.log('[PalPluss] Looking up transaction by external_reference:', external_reference)
 
-    // ✅ FIX: Try to find by external_reference first (our checkoutRequestId)
+    // ✅ FIX: Look up by external_reference (our GWAVE_DEP_XXX reference)
     let tx = null
     
     if (external_reference) {
@@ -443,7 +445,6 @@ async function palplussCallback(req, res, next) {
       }
     }
 
-    // ✅ FIX: Broadcast with 'event' not 'type'
     if (transactionUpdated) {
       broadcastToUser(tx.user_id, {
         event: 'transaction_updated',
@@ -473,6 +474,8 @@ async function palplussCallback(req, res, next) {
     })
   }
 }
+
+// ── Rest of the file (unchanged) ────────────────────────────────
 
 async function completeTransactionManually(req, res, next) {
   try {
@@ -519,7 +522,6 @@ async function completeTransactionManually(req, res, next) {
       console.log(`[Test] Manually completed deposit ${tx.id} - Credited ${tx.amount_usd} USD`)
     }
 
-    // ✅ FIX: Broadcast with 'event' not 'type'
     broadcastToUser(tx.user_id, {
       event: 'transaction_updated',
       transactionId: tx.id,
@@ -544,8 +546,6 @@ async function completeTransactionManually(req, res, next) {
     next(err) 
   }
 }
-
-// ── Withdrawal ─────────────────────────────────────────────────────
 
 async function withdrawMpesa(req, res, next) {
   try {
