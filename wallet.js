@@ -306,6 +306,7 @@ async function depositMpesa(req, res, next) {
       status: 'pending',
     })
 
+    // Generate our reference - this will be used as accountReference in PalPluss
     const reference = `GWAVE_DEP_${tx.id.substring(0, 8).toUpperCase()}`
 
     let checkoutRequestId
@@ -323,6 +324,8 @@ async function depositMpesa(req, res, next) {
       })
     }
 
+    // Store the checkoutRequestId as the reference in our transaction
+    // This will be sent back as external_reference in the webhook
     await db.updateTransactionStatus(tx.id, 'pending', checkoutRequestId)
 
     if (req.idempotencyKey && req.idempotencyStore) {
@@ -374,7 +377,7 @@ async function palplussCallback(req, res, next) {
     }
 
     const { 
-      id: transactionId,
+      id: palplussTransactionId,
       status,
       amount,
       currency,
@@ -384,10 +387,29 @@ async function palplussCallback(req, res, next) {
       external_reference
     } = transaction
 
-    const tx = await db.getTransactionByReference(transactionId)
+    console.log('[PalPluss] Looking up transaction by external_reference:', external_reference)
+
+    // ✅ FIX: Try to find by external_reference first (our checkoutRequestId)
+    let tx = null
     
+    if (external_reference) {
+      tx = await db.getTransactionByReference(external_reference)
+      if (tx) {
+        console.log('[PalPluss] Found transaction by external_reference:', tx.id)
+      }
+    }
+    
+    // If not found by external_reference, try by the PalPluss transaction ID
     if (!tx) {
-      console.warn(`[PalPluss] Unknown transaction reference: ${transactionId}`)
+      console.log('[PalPluss] Trying to find by PalPluss transaction ID:', palplussTransactionId)
+      tx = await db.getTransactionByReference(palplussTransactionId)
+      if (tx) {
+        console.log('[PalPluss] Found transaction by PalPluss ID:', tx.id)
+      }
+    }
+
+    if (!tx) {
+      console.warn(`[PalPluss] Unknown transaction. External ref: ${external_reference}, PalPluss ID: ${palplussTransactionId}`)
       return res.status(200).json({ success: true, received: true })
     }
 
@@ -401,7 +423,7 @@ async function palplussCallback(req, res, next) {
 
     if (isSuccess) {
       if (tx.status !== 'completed') {
-        await db.updateTransactionStatus(tx.id, 'completed', transactionId)
+        await db.updateTransactionStatus(tx.id, 'completed', palplussTransactionId)
         newStatus = 'completed'
         transactionUpdated = true
         console.log(`[PalPluss] Transaction ${tx.id} marked as completed`)
@@ -414,16 +436,10 @@ async function palplussCallback(req, res, next) {
       }
     } else if (isFailed) {
       if (tx.status !== 'failed') {
-        await db.updateTransactionStatus(tx.id, 'failed', transactionId)
+        await db.updateTransactionStatus(tx.id, 'failed', palplussTransactionId)
         newStatus = 'failed'
         transactionUpdated = true
         console.log(`[PalPluss] Transaction ${tx.id} marked as failed: ${result_desc || status}`)
-        
-        if (tx.type === 'withdrawal') {
-          const account = await db.getAccountByUserAndType(tx.user_id, 'real')
-          await db.addBalance(account.id, parseFloat(tx.amount_usd))
-          console.log(`[PalPluss] Re-credited ${tx.amount_usd} USD for failed withdrawal`)
-        }
       }
     }
 
@@ -436,7 +452,7 @@ async function palplussCallback(req, res, next) {
         type: tx.type,
         amount_usd: parseFloat(tx.amount_usd),
         amount_kes: tx.amount_kes,
-        reference: transactionId,
+        reference: palplussTransactionId,
       })
       
       console.log(`[PalPluss] Broadcast transaction update to user ${tx.user_id}: ${newStatus}`)
