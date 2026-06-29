@@ -1,5 +1,6 @@
 // store.ts
 import { create } from "zustand";
+import { toast } from "sonner"; // ✅ Import toast at the top
 import { 
   getMe, 
   getBalances, 
@@ -421,13 +422,14 @@ export const useApp = create<AppState>((set, get) => {
         get().fetchBalances();
       });
 
-      // NEW: Listen for transaction status updates
+      // Listen for transaction status updates from WebSocket
       wsInstance.on('transaction_updated', (data) => {
         console.log('[WS] Transaction updated:', data);
-        // Refresh balances and transactions when a transaction updates
+        
+        // Refresh balances when a transaction updates
         get().fetchBalances();
-        // Show a toast notification based on status
-        const { toast } = require('sonner');
+        
+        // Show toast notification based on status
         if (data.status === 'completed') {
           if (data.type === 'deposit') {
             toast.success(`Deposit of $${data.amount_usd.toFixed(2)} completed successfully!`);
