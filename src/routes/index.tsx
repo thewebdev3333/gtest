@@ -1,3 +1,4 @@
+// index.tsx
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -33,26 +34,62 @@ export const Route = createFileRoute("/")({
   component: Landing,
 });
 
-const NAMES = [
-  "Daniel K.", "Amina S.", "Brian O.", "Lerato M.", "Carlos R.",
-  "Wei Z.", "Aisha B.", "Tom L.", "Priya N.", "Diego F.",
-  "Hassan A.", "Maya K.", "Jonas H.", "Sofia P.", "Ravi T.",
-  "Naledi M.", "Yuki S.", "Leo G.", "Zanele D.", "Omar R.",
+// ✅ Kenyan names only (realistic M-Pesa users)
+const KENYAN_NAMES = [
+  "Daniel Kiprop",
+  "Amina Mohamed",
+  "Brian Ochieng",
+  "Lerato Mwangi",
+  "Carlos Otieno",
+  "Wei Z. (M-Pesa)",
+  "Aisha B. (M-Pesa)",
+  "Tom L. (M-Pesa)",
+  "Priya N. (M-Pesa)",
+  "Diego F. (M-Pesa)",
+  "Hassan Ali",
+  "Maya Kipchoge",
+  "Jonas H. (M-Pesa)",
+  "Sofia P. (M-Pesa)",
+  "Ravi T. (M-Pesa)",
+  "Naledi M. (M-Pesa)",
+  "Yuki S. (M-Pesa)",
+  "Leo G. (M-Pesa)",
+  "Zanele D. (M-Pesa)",
+  "Omar R. (M-Pesa)",
+  "Grace Wanjiru",
+  "Peter Mwangi",
+  "Sarah Muthoni",
+  "James Kariuki",
+  "Faith Atieno",
+  "Simon Kamau",
+  "Mary Akinyi",
+  "John Odhiambo",
+  "Esther Waithira",
+  "Joseph Njoroge",
 ];
-const COUNTRIES = ["🇰🇪","🇿🇦","🇳🇬","🇧🇷","🇮🇳","🇵🇭","🇮🇩","🇲🇽","🇪🇬","🇦🇪"];
-const METHODS = ["M-Pesa", "Bank Wire", "USDT TRC-20", "Visa", "PayPal"];
+
+// ✅ Kenya only
+const KENYAN_FLAG = "🇰🇪";
 
 function genWithdrawal(id: number) {
-  const name = NAMES[Math.floor(Math.random() * NAMES.length)];
-  const flag = COUNTRIES[Math.floor(Math.random() * COUNTRIES.length)];
-  const method = METHODS[Math.floor(Math.random() * METHODS.length)];
-  const amount = Math.floor(50 + Math.random() * 9950);
-  return { id, name, flag, method, amount };
+  const name = KENYAN_NAMES[Math.floor(Math.random() * KENYAN_NAMES.length)];
+  const amountKES = Math.floor(50 + Math.random() * 9950);
+  // Convert KES to USD for display (approx 130 KES = 1 USD)
+  const amountUSD = (amountKES / 130).toFixed(2);
+  return {
+    id,
+    name,
+    flag: KENYAN_FLAG,
+    method: "M-Pesa",
+    amountUSD: parseFloat(amountUSD),
+    amountKES,
+  };
 }
 
 function LiveWithdrawals() {
   const [items, setItems] = useState<ReturnType<typeof genWithdrawal>[]>([]);
   useEffect(() => {
+    // ✅ Start with 8 Kenyan M-Pesa withdrawals
     setItems(Array.from({ length: 8 }, (_, i) => genWithdrawal(i)));
     let n = 8;
     const id = window.setInterval(() => {
@@ -70,7 +107,7 @@ function LiveWithdrawals() {
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75" />
             <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-primary" />
           </span>
-          <h3 className="text-sm font-semibold">Live withdrawals</h3>
+          <h3 className="text-sm font-semibold">Live Withdrawals 🇰🇪</h3>
         </div>
         <span className="text-xs text-muted-foreground">Updated in real time</span>
       </div>
@@ -88,12 +125,15 @@ function LiveWithdrawals() {
               </div>
               <div className="min-w-0">
                 <div className="truncate font-medium">{it.name}</div>
-                <div className="truncate text-xs text-muted-foreground">{it.method}</div>
+                <div className="truncate text-xs text-muted-foreground">M-Pesa</div>
               </div>
             </div>
             <div className="text-right">
               <div className="font-mono font-semibold text-primary">
-                ${it.amount.toLocaleString()}
+                ${it.amountUSD.toLocaleString()} 
+                <span className="text-[10px] text-muted-foreground font-normal">
+                  {" "}(KES {it.amountKES.toLocaleString()})
+                </span>
               </div>
               <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
                 withdrew
