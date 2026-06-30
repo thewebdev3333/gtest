@@ -787,6 +787,11 @@ async function getKycStatusHandler(req, res, next) {
 
 // Alias for backward compatibility
 const checkTransactionStatus = checkPalPlussTransactionStatus;
+
+function setWebSocketServer(wss) {
+  // No-op - WebSocket broadcasting is no longer used
+  console.log('[Wallet] WebSocket broadcasting disabled (using polling instead)')
+}
 // ── Exports ──────────────────────────────────────────────────────
 
 module.exports = {
@@ -807,4 +812,5 @@ module.exports = {
   completeTransactionManually,
   checkPendingTransactions,
   formatPhoneNumber,
+  setWebSocketServer, 
 }
