@@ -220,7 +220,7 @@ export function PriceChart() {
         // Replace seed data with real history
         seriesRef.current?.setData(chartData);
         
-        // ✅ FIX: Set lastTimeRef to the last historical timestamp
+        // Set lastTimeRef to the last historical timestamp
         lastTimeRef.current = chartData[chartData.length - 1].time as number;
         
         chartRef.current?.timeScale().fitContent();
@@ -236,7 +236,7 @@ export function PriceChart() {
     };
   }, [ws, volatility, isReady]);
 
-  // ── ✅ FIX: Always forward live price changes to chart ──────────
+  // ── Always forward live price changes to chart ──────────────────
   useEffect(() => {
     if (!seriesRef.current || !isReady) return;
     
@@ -247,16 +247,17 @@ export function PriceChart() {
     
   }, [price, isReady]);
 
-  // ── Entry markers ────────────────────────────────────────────────
+  // ── ✅ FIX: Entry markers - filter by volatility ─────────────────
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
-    
+
     const lines = entryLinesRef.current;
     const openIds = new Set<string>();
-    
+
+    // ✅ Only draw entry lines for trades that match the current volatility
     for (const t of trades) {
-      if (t.status === "open") {
+      if (t.status === "open" && t.volatility === volatility) {
         openIds.add(t.id);
         if (!lines.has(t.id)) {
           const isNeg = ["fall", "under", "differ", "odd"].includes(t.direction);
@@ -273,8 +274,8 @@ export function PriceChart() {
         }
       }
     }
-    
-    // Remove lines for trades no longer open
+
+    // Remove lines for trades that are no longer open or don't match current volatility
     for (const [id, line] of lines) {
       if (!openIds.has(id)) {
         try {
@@ -285,7 +286,7 @@ export function PriceChart() {
         lines.delete(id);
       }
     }
-  }, [trades]);
+  }, [trades, volatility]); // ✅ Added volatility to dependencies
 
   // ── Zoom controls via window event ──────────────────────────────
   useEffect(() => {
