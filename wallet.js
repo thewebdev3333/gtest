@@ -784,6 +784,9 @@ async function getKycStatusHandler(req, res, next) {
   } catch (err) { next(err) }
 }
 
+
+// Alias for backward compatibility
+const checkTransactionStatus = checkPalPlussTransactionStatus;
 // ── Exports ──────────────────────────────────────────────────────
 
 module.exports = {
@@ -799,7 +802,8 @@ module.exports = {
   getKycStatus,
   kycUpload,
   initiateStkPush,
-  checkTransactionStatus,
+  checkTransactionStatus,        // ✅ Added
+  checkPalPlussTransactionStatus,
   completeTransactionManually,
   checkPendingTransactions,
   formatPhoneNumber,
