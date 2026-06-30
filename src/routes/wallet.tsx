@@ -37,7 +37,6 @@ function WalletPage() {
   const isAuthenticated = useApp((s) => s.isAuthenticated);
   const fetchBalances = useApp((s) => s.fetchBalances);
 
-  // ✅ This is the only function we need - it fetches fresh data from the database
   const loadTransactions = useCallback(async () => {
     try {
       console.log('[Wallet] Loading transactions...');
@@ -45,6 +44,7 @@ function WalletPage() {
       if (response.success) {
         setTransactions(response.data.transactions);
         const hasPendingTx = response.data.transactions.some(tx => tx.status === 'pending');
+        console.log('[Wallet] Has pending transactions:', hasPendingTx);
         
         // Start or stop polling based on pending status
         if (hasPendingTx && !isPollingRef.current) {
@@ -84,7 +84,6 @@ function WalletPage() {
     }
   }, [fetchBalances, loadTransactions, loadWithdrawals]);
 
-  // ✅ Simple polling - just calls loadTransactions() every 3 seconds
   const startPolling = useCallback(() => {
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current);
@@ -96,7 +95,6 @@ function WalletPage() {
     setIsPolling(true);
     
     pollingIntervalRef.current = setInterval(() => {
-      // ✅ Just refresh the transactions from the database
       loadTransactions();
       fetchBalances();
     }, 3000);
@@ -112,7 +110,6 @@ function WalletPage() {
     setIsPolling(false);
   }, []);
 
-  // ✅ Manual refresh button
   const handleRefresh = useCallback(() => {
     loadData();
     toast.info('Refreshing...');
@@ -282,7 +279,8 @@ function WalletPage() {
           </Card>
         )}
 
-        <DepositModal open={open} onOpenChange={setOpen} />
+        {/* ✅ Pass onDeposited={loadTransactions} to trigger refresh */}
+        <DepositModal open={open} onOpenChange={setOpen} onDeposited={loadTransactions} />
       </div>
     </AppShell>
   );

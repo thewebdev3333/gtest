@@ -1,3 +1,4 @@
+// DepositModal.tsx
 import { useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -8,7 +9,15 @@ import { toast } from "sonner";
 import { useApp } from "@/lib/store";
 import { depositMpesa } from "@/lib/api";
 
-export function DepositModal({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
+export function DepositModal({
+  open,
+  onOpenChange,
+  onDeposited,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  onDeposited?: () => void;
+}) {
   const [phone, setPhone] = useState("");
   const [amount, setAmount] = useState("10");
   const [submitting, setSubmitting] = useState(false);
@@ -51,6 +60,9 @@ export function DepositModal({ open, onOpenChange }: { open: boolean; onOpenChan
       
       if (response.success) {
         toast.success("STK Push sent! Check your phone to authorize the payment.");
+        
+        // ✅ Trigger an immediate refresh so the pending transaction shows up right away
+        onDeposited?.();
         
         if (response.data.testMode) {
           toast.info(`Test mode: Use ${response.data.manualComplete} to complete manually`, {
