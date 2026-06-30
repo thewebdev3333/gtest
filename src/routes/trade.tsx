@@ -1,3 +1,4 @@
+// trade.tsx - Add Auto Trade tab alongside TradeControls
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
@@ -5,6 +6,7 @@ import { PriceChart } from "@/components/trade/Chart";
 import { ContractSelector } from "@/components/trade/ContractSelector";
 import { VolatilityIndicator } from "@/components/trade/VolatilityIndicator";
 import { TradeControls } from "@/components/trade/TradeControls";
+import { AutoTradeControls } from "@/components/trade/AutoTradeControls"; // ✅ Import
 import { Positions } from "@/components/trade/Positions";
 import { useApp, formatMoney } from "@/lib/store";
 import { useTickEngine } from "@/lib/tick-engine";
@@ -14,6 +16,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 export const Route = createFileRoute("/trade")({
   head: () => ({
@@ -50,7 +53,7 @@ function TradePage() {
       <div className="flex h-full flex-col md:flex-row">
         {/* Chart area */}
         <div className="flex min-h-0 flex-1 flex-col">
-          {/* Top selectors — volatility on left, contract on right (matches design) */}
+          {/* Top selectors */}
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-background p-2">
             <div className="min-w-[200px] max-w-xs flex-1">
               <VolatilityIndicator />
@@ -89,7 +92,7 @@ function TradePage() {
           </div>
         </div>
 
-        {/* Right side panel: controls + positions. Collapsible on mobile. */}
+        {/* Right side panel */}
         <aside className="w-full md:w-[340px] shrink-0 overflow-y-auto border-t md:border-t-0 md:border-l border-border bg-background md:p-3 md:space-y-4">
           {/* Mobile collapsibles */}
           <div className="md:hidden">
@@ -99,7 +102,18 @@ function TradePage() {
                 <ChevronDown className="h-4 w-4 transition data-[state=open]:rotate-180" />
               </CollapsibleTrigger>
               <CollapsibleContent className="p-3">
-                <TradeControls />
+                <Tabs defaultValue="manual" className="w-full">
+                  <TabsList className="grid w-full grid-cols-2">
+                    <TabsTrigger value="manual">Manual</TabsTrigger>
+                    <TabsTrigger value="auto">Auto</TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="manual" className="pt-3">
+                    <TradeControls />
+                  </TabsContent>
+                  <TabsContent value="auto" className="pt-3">
+                    <AutoTradeControls />
+                  </TabsContent>
+                </Tabs>
               </CollapsibleContent>
             </Collapsible>
             <Collapsible defaultOpen={false}>
@@ -112,10 +126,27 @@ function TradePage() {
               </CollapsibleContent>
             </Collapsible>
           </div>
+
           {/* Desktop layout */}
-          <div className="hidden md:block space-y-4">
-            <TradeControls />
-            <div className="border-t border-border pt-3">
+          <div className="hidden md:block">
+            <Tabs defaultValue="manual" className="w-full">
+              <TabsList className="grid w-full grid-cols-2">
+                <TabsTrigger value="manual">Manual</TabsTrigger>
+                <TabsTrigger value="auto">
+                  Auto
+                  {useApp((s) => s.autoTrade.isRunning) && (
+                    <span className="ml-1.5 inline-block h-2 w-2 animate-pulse rounded-full bg-primary" />
+                  )}
+                </TabsTrigger>
+              </TabsList>
+              <TabsContent value="manual" className="pt-3">
+                <TradeControls />
+              </TabsContent>
+              <TabsContent value="auto" className="pt-3">
+                <AutoTradeControls />
+              </TabsContent>
+            </Tabs>
+            <div className="mt-3 border-t border-border pt-3">
               <Positions />
             </div>
           </div>

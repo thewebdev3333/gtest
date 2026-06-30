@@ -18,7 +18,6 @@ import {
   getToken,
   setToken,
   removeToken,
-  mapSymbolToFrontend,
   mapSymbolToBackend,
   type Position,
   type Transaction,
@@ -48,6 +47,13 @@ export const CONTRACTS: { id: ContractType; label: string }[] = [
 
 export const NEGATIVE_DIRECTIONS: Direction[] = ["fall", "under", "differ", "odd"];
 
+export const PAYOUT_MULTIPLIER: Record<ContractType, number> = {
+  rise_fall: 1.836,
+  over_under: 1.85,
+  match_differ: 1.236,
+  even_odd: 1.95,
+};
+
 export interface Trade {
   id: string;
   contract: ContractType;
@@ -65,21 +71,45 @@ export interface Trade {
   pnl?: number;
 }
 
+export interface AutoTradeConfig {
+  enabled: boolean;
+  direction: Direction;
+  contract: ContractType;
+  volatility: VolatilityId;
+  stake: number;
+  stopLoss: number;
+  takeProfit: number;
+  maxTrades?: number;
+  isRunning: boolean;
+  totalPnl: number;
+  tradesCount: number;
+  wins: number;
+  losses: number;
+  startedAt: number | null;
+}
+
 interface AppState {
+  // Theme & UI
   theme: Theme;
   setTheme: (t: Theme) => void;
   currency: Currency;
   setCurrency: (c: Currency) => void;
   fxRate: number;
+  
+  // Account
   account: AccountKind;
   setAccount: (a: AccountKind) => void;
   demoBalance: number;
   realBalance: number;
   deposit: (usd: number, to: AccountKind) => void;
+  
+  // Auth
   isAuthenticated: boolean;
   user: { id: string; email: string; name: string } | null;
   setAuthenticated: (status: boolean, user?: { id: string; email: string; name: string }) => void;
   logout: () => void;
+  
+  // Trading
   volatility: VolatilityId;
   setVolatility: (v: VolatilityId) => void;
   contract: ContractType;
@@ -91,13 +121,30 @@ interface AppState {
   trades: Trade[];
   openTrade: (t: Omit<Trade, "id" | "status" | "entryAt" | "expiresAt"> & { entryAt?: number }) => Trade;
   settleTrade: (id: string, exitPrice: number) => void;
+  
+  // Chart
   crosshairEnabled: boolean;
   toggleCrosshair: () => void;
+  
+  // Loading & Errors
   isLoading: boolean;
   error: string | null;
+  
+  // WebSocket
   ws: MarketWebSocket | null;
   isConnected: boolean;
+  
+  // KYC
   kycStatus: 'none' | 'pending' | 'approved' | 'rejected';
+  
+  // Auto Trade
+  autoTrade: AutoTradeConfig;
+  startAutoTrade: (config: Partial<AutoTradeConfig>) => void;
+  stopAutoTrade: () => void;
+  placeAutoTrade: () => Promise<void>;
+  handleAutoTradeSettlement: (trade: Trade) => void;
+  
+  // Data fetching
   fetchUserData: () => Promise<void>;
   fetchBalances: () => Promise<void>;
   fetchExchangeRate: () => Promise<void>;
@@ -105,6 +152,8 @@ interface AppState {
   syncAll: () => Promise<void>;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
+  
+  // WebSocket management
   connectWebSocket: () => void;
   disconnectWebSocket: () => void;
   subscribeToMarket: (symbol: string) => void;
@@ -113,6 +162,8 @@ interface AppState {
 
 const STORAGE_KEY = "gwave_prefs_v1";
 const AUTH_KEY = "gwave_auth";
+
+// ── Persistence Helpers ──────────────────────────────────────────
 
 function loadPrefs(): Partial<Pick<AppState, "theme" | "currency" | "account" | "demoBalance" | "realBalance">> {
   if (typeof window === "undefined") return {};
@@ -151,6 +202,25 @@ function saveAuth(isAuthenticated: boolean, user: { id: string; email: string; n
   sessionStorage.setItem(AUTH_KEY, JSON.stringify({ isAuthenticated, user }));
 }
 
+const initialAutoTrade: AutoTradeConfig = {
+  enabled: false,
+  direction: "rise",
+  contract: "rise_fall",
+  volatility: "v100_1s",
+  stake: 5,
+  stopLoss: 20,
+  takeProfit: 10,
+  maxTrades: undefined,
+  isRunning: false,
+  totalPnl: 0,
+  tradesCount: 0,
+  wins: 0,
+  losses: 0,
+  startedAt: null,
+};
+
+// ── Store ──────────────────────────────────────────────────────────
+
 export const useApp = create<AppState>((set, get) => {
   const prefs = loadPrefs();
   const auth = loadAuth();
@@ -158,11 +228,14 @@ export const useApp = create<AppState>((set, get) => {
   let wsInstance: MarketWebSocket | null = null;
   
   return {
+    // ── Theme ──────────────────────────────────────────────────────
     theme: prefs.theme ?? "dark",
     setTheme: (t) => {
       set({ theme: t });
       savePrefs(get());
     },
+    
+    // ── Currency ──────────────────────────────────────────────────
     currency: prefs.currency ?? "USD",
     setCurrency: (c) => {
       set({ currency: c });
@@ -170,6 +243,7 @@ export const useApp = create<AppState>((set, get) => {
     },
     fxRate: 129.5,
 
+    // ── Account ───────────────────────────────────────────────────
     account: prefs.account ?? "demo",
     setAccount: (a) => {
       set({ account: a });
@@ -186,6 +260,7 @@ export const useApp = create<AppState>((set, get) => {
       savePrefs(get());
     },
 
+    // ── Auth ──────────────────────────────────────────────────────
     isAuthenticated: auth.isAuthenticated,
     user: auth.user,
     setAuthenticated: (status, user) => {
@@ -212,7 +287,7 @@ export const useApp = create<AppState>((set, get) => {
       set({ ws: null, isConnected: false });
     },
 
-    // ✅ FIX: Unsubscribe from previous symbol before subscribing to new one
+    // ── Volatility & Contract ────────────────────────────────────
     volatility: "v100_1s",
     setVolatility: (v) => {
       const prev = get().volatility;
@@ -230,11 +305,13 @@ export const useApp = create<AppState>((set, get) => {
     contract: "rise_fall",
     setContract: (c) => set({ contract: c }),
 
+    // ── Price ─────────────────────────────────────────────────────
     price: 204.33,
     prevPrice: 204.33,
     setPrice: (p) => set((s) => ({ price: p, prevPrice: s.price })),
     resetPrice: (p) => set({ price: p, prevPrice: p }),
 
+    // ── Trades ────────────────────────────────────────────────────
     trades: [],
     openTrade: (t) => {
       const entryAt = t.entryAt ?? Date.now();
@@ -256,6 +333,7 @@ export const useApp = create<AppState>((set, get) => {
     settleTrade: (id, exitPrice) => {
       const t = get().trades.find((x) => x.id === id);
       if (!t || t.status !== "open") return;
+      
       let won = false;
       const lastDigit = Math.floor(exitPrice * 100) % 10;
       switch (t.direction) {
@@ -287,6 +365,7 @@ export const useApp = create<AppState>((set, get) => {
       const pnl = won ? t.payout - t.stake : -t.stake;
       const credit = won ? t.payout : 0;
       const balKey = get().account === "demo" ? "demoBalance" : "realBalance";
+      
       set((s) => ({
         trades: s.trades.map((x) =>
           x.id === id
@@ -296,11 +375,19 @@ export const useApp = create<AppState>((set, get) => {
         [balKey]: (s[balKey] as number) + credit,
       }) as Partial<AppState>);
       savePrefs(get());
+      
+      // ✅ Auto Trade: Check if this trade was part of auto trading
+      const autoTrade = get().autoTrade;
+      if (autoTrade.isRunning) {
+        get().handleAutoTradeSettlement(t);
+      }
     },
 
+    // ── Chart ─────────────────────────────────────────────────────
     crosshairEnabled: true,
     toggleCrosshair: () => set((s) => ({ crosshairEnabled: !s.crosshairEnabled })),
 
+    // ── Loading & Errors ─────────────────────────────────────────
     isLoading: false,
     error: null,
     ws: null,
@@ -310,6 +397,189 @@ export const useApp = create<AppState>((set, get) => {
     setLoading: (loading) => set({ isLoading: loading }),
     setError: (error) => set({ error }),
 
+    // ── Auto Trade ────────────────────────────────────────────────
+    autoTrade: initialAutoTrade,
+
+    startAutoTrade: (config) => {
+      const state = get();
+      const current = state.autoTrade;
+      
+      if (current.isRunning) {
+        toast.warning("Auto trading is already running");
+        return;
+      }
+      
+      const stake = config.stake || current.stake;
+      const balKey = state.account === "demo" ? "demoBalance" : "realBalance";
+      const balance = state[balKey] as number;
+      
+      if (balance < stake * 2) {
+        toast.error(`Insufficient balance. Need at least ${formatMoney(stake * 2, state.currency, state.fxRate)} to start.`);
+        return;
+      }
+      
+      set({
+        autoTrade: {
+          ...current,
+          ...config,
+          enabled: true,
+          isRunning: true,
+          totalPnl: 0,
+          tradesCount: 0,
+          wins: 0,
+          losses: 0,
+          startedAt: Date.now(),
+          stake: stake,
+        }
+      });
+      
+      toast.success("Auto Trading started! 🚀", {
+        description: `Direction: ${config.direction || current.direction} · Stop Loss: $${config.stopLoss || current.stopLoss} · Take Profit: $${config.takeProfit || current.takeProfit}`
+      });
+      
+      // Place first trade immediately
+      setTimeout(() => {
+        get().placeAutoTrade();
+      }, 500);
+    },
+
+    stopAutoTrade: () => {
+      const current = get().autoTrade;
+      if (!current.isRunning) return;
+      
+      const duration = current.startedAt ? Math.round((Date.now() - current.startedAt) / 1000 / 60) : 0;
+      
+      set({
+        autoTrade: {
+          ...current,
+          isRunning: false,
+          enabled: false,
+        }
+      });
+      
+      const state = get();
+      toast.info(`Auto Trading stopped after ${duration} minute${duration !== 1 ? 's' : ''}`, {
+        description: `Trades: ${current.tradesCount} · P&L: ${formatMoney(current.totalPnl, state.currency, state.fxRate)}`
+      });
+    },
+
+    placeAutoTrade: async () => {
+      const state = get();
+      const { autoTrade } = state;
+      
+      if (!autoTrade.isRunning) {
+        return;
+      }
+      
+      // Check if we've reached stop loss
+      if (autoTrade.totalPnl <= -autoTrade.stopLoss) {
+        toast.error(`Auto Trading stopped: Stop Loss hit (${formatMoney(autoTrade.totalPnl, state.currency, state.fxRate)})`);
+        state.stopAutoTrade();
+        return;
+      }
+      
+      // Check if we've reached take profit
+      if (autoTrade.totalPnl >= autoTrade.takeProfit) {
+        toast.success(`Auto Trading finished: Take Profit hit (${formatMoney(autoTrade.totalPnl, state.currency, state.fxRate)}) 🎉`);
+        state.stopAutoTrade();
+        return;
+      }
+      
+      // Check max trades
+      if (autoTrade.maxTrades && autoTrade.tradesCount >= autoTrade.maxTrades) {
+        toast.info(`Auto Trading finished: Max trades (${autoTrade.maxTrades}) reached`);
+        state.stopAutoTrade();
+        return;
+      }
+      
+      // Check balance
+      const balKey = state.account === "demo" ? "demoBalance" : "realBalance";
+      const balance = state[balKey] as number;
+      if (balance < autoTrade.stake) {
+        toast.error("Auto Trading stopped: Insufficient balance");
+        state.stopAutoTrade();
+        return;
+      }
+      
+      // Place the trade
+      try {
+        const payout = autoTrade.stake * PAYOUT_MULTIPLIER[autoTrade.contract];
+        const durationMs = 60000; // 1 minute default
+        
+        // Get current price
+        const currentPrice = state.price;
+        
+        // Open the trade
+        const trade = state.openTrade({
+          contract: autoTrade.contract,
+          direction: autoTrade.direction,
+          volatility: autoTrade.volatility,
+          stake: autoTrade.stake,
+          payout: payout,
+          durationMs: durationMs,
+          entryPrice: currentPrice,
+          ...(autoTrade.contract === "over_under" || autoTrade.contract === "match_differ" ? { barrier: 5 } : {}),
+        });
+        
+        console.log(`[Auto Trade] Placed trade #${autoTrade.tradesCount + 1}: ${trade.id} ${autoTrade.direction} @ ${trade.entryPrice}`);
+        
+        // Update trades count
+        set((s) => ({
+          autoTrade: {
+            ...s.autoTrade,
+            tradesCount: s.autoTrade.tradesCount + 1,
+          }
+        }));
+        
+      } catch (err) {
+        console.error('[Auto Trade] Error placing trade:', err);
+        toast.error('Failed to place auto trade');
+        state.stopAutoTrade();
+      }
+    },
+
+    handleAutoTradeSettlement: (trade: Trade) => {
+      const state = get();
+      const { autoTrade } = state;
+      
+      if (!autoTrade.isRunning) return;
+      
+      const pnl = trade.pnl || 0;
+      const newTotalPnl = autoTrade.totalPnl + pnl;
+      
+      const wins = pnl > 0 ? autoTrade.wins + 1 : autoTrade.wins;
+      const losses = pnl <= 0 ? autoTrade.losses + 1 : autoTrade.losses;
+      
+      set((s) => ({
+        autoTrade: {
+          ...s.autoTrade,
+          totalPnl: newTotalPnl,
+          wins,
+          losses,
+        }
+      }));
+      
+      // Check if we hit stop loss
+      if (newTotalPnl <= -autoTrade.stopLoss) {
+        toast.error(`Auto Trading stopped: Stop Loss hit (${formatMoney(newTotalPnl, state.currency, state.fxRate)})`);
+        state.stopAutoTrade();
+        return;
+      }
+      
+      // Check if we hit take profit
+      if (newTotalPnl >= autoTrade.takeProfit) {
+        toast.success(`Auto Trading finished: Take Profit hit (${formatMoney(newTotalPnl, state.currency, state.fxRate)}) 🎉`);
+        state.stopAutoTrade();
+        return;
+      }
+      
+      // Place next trade
+      setTimeout(() => {
+        state.placeAutoTrade();
+      }, 1000);
+    },
+
+    // ── Data Fetching ─────────────────────────────────────────────
     fetchUserData: async () => {
       try {
         set({ isLoading: true, error: null });
@@ -381,7 +651,7 @@ export const useApp = create<AppState>((set, get) => {
             id: p.id,
             contract: p.contract_type as any,
             direction: p.direction as any,
-            volatility: mapSymbolToFrontend(p.symbol) as VolatilityId,
+            volatility: p.symbol as any,
             stake: parseFloat(p.stake),
             payout: parseFloat(p.potential_payout),
             durationMs: p.duration_ticks * 1000,
@@ -407,6 +677,7 @@ export const useApp = create<AppState>((set, get) => {
       ]);
     },
 
+    // ── WebSocket ──────────────────────────────────────────────────
     connectWebSocket: () => {
       if (wsInstance) {
         wsInstance.disconnect();
@@ -416,7 +687,6 @@ export const useApp = create<AppState>((set, get) => {
       const token = getToken();
       wsInstance = new MarketWebSocket(token || undefined);
       
-      // ✅ FIX: Filter ticks by current symbol to prevent cross-contamination
       wsInstance.on('tick', (data) => {
         if (data.price && data.symbol === get().volatility) {
           set((s) => ({
@@ -436,9 +706,9 @@ export const useApp = create<AppState>((set, get) => {
         get().fetchBalances();
         if (data.status === 'completed') {
           if (data.type === 'deposit') {
-            toast.success(`Deposit of $${data.amount_usd.toFixed(2)} completed successfully!`);
+            toast.success(`Deposit of $${data.amount_usd?.toFixed(2) || '0.00'} completed successfully!`);
           } else if (data.type === 'withdrawal') {
-            toast.success(`Withdrawal of $${data.amount_usd.toFixed(2)} completed!`);
+            toast.success(`Withdrawal of $${data.amount_usd?.toFixed(2) || '0.00'} completed!`);
           }
         } else if (data.status === 'failed') {
           if (data.type === 'deposit') {
@@ -489,6 +759,8 @@ export const useApp = create<AppState>((set, get) => {
     },
   };
 });
+
+// ── Helper ──────────────────────────────────────────────────────
 
 export function formatMoney(usd: number, currency: Currency, fxRate: number): string {
   const v = currency === "USD" ? usd : usd * fxRate;
