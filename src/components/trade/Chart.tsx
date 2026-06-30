@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+// src/components/trade/Chart.tsx
+import { useEffect, useRef, useState } from "react";
 import {
   createChart,
   AreaSeries,
@@ -22,21 +23,27 @@ export function PriceChart() {
   const seriesRef = useRef<ISeriesApi<"Area"> | null>(null);
   const lastTimeRef = useRef<number>(0);
   const entryLinesRef = useRef<Map<string, IPriceLine>>(new Map());
+  const hasReceivedHistoryRef = useRef<boolean>(false);
+  const [isReady, setIsReady] = useState(false);
 
   const price = useApp((s) => s.price);
   const crosshairEnabled = useApp((s) => s.crosshairEnabled);
   const theme = useApp((s) => s.theme);
   const trades = useApp((s) => s.trades);
+  const ws = useApp((s) => s.ws);
+  const volatility = useApp((s) => s.volatility);
 
-  // setup chart
+  // ── Setup chart ──────────────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current) return;
+    
     const isDark =
       theme === "dark" ||
       (theme === "system" &&
         window.matchMedia("(prefers-color-scheme: dark)").matches);
     const fg = isDark ? "#e6e6e6" : "#222";
     const grid = isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.06)";
+    
     const chart = createChart(containerRef.current, {
       layout: {
         background: { color: "transparent" },
@@ -44,7 +51,10 @@ export function PriceChart() {
         attributionLogo: false,
       },
       grid: { vertLines: { color: grid }, horzLines: { color: grid } },
-      rightPriceScale: { borderColor: grid, scaleMargins: { top: 0.1, bottom: 0.1 } },
+      rightPriceScale: { 
+        borderColor: grid, 
+        scaleMargins: { top: 0.1, bottom: 0.1 } 
+      },
       timeScale: {
         borderColor: grid,
         timeVisible: true,
@@ -54,7 +64,12 @@ export function PriceChart() {
         fixRightEdge: true,
         tickMarkFormatter: (time: number) => {
           const d = new Date((time as number) * 1000);
-          return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+          return d.toLocaleTimeString([], { 
+            hour: "2-digit", 
+            minute: "2-digit", 
+            second: "2-digit", 
+            hour12: false 
+          });
         },
       },
       localization: {
@@ -69,7 +84,6 @@ export function PriceChart() {
       crosshair: {
         mode: crosshairEnabled ? CrosshairMode.Normal : CrosshairMode.Hidden,
       },
-      // Disable native mouse-wheel zoom so we can anchor zoom to the right edge ourselves.
       handleScale: {
         mouseWheel: false,
         axisPressedMouseMove: { time: false, price: true },
@@ -77,6 +91,7 @@ export function PriceChart() {
       },
       autoSize: true,
     });
+
     const series = chart.addSeries(AreaSeries, {
       lineColor: "#00c853",
       topColor: "rgba(0, 200, 83, 0.35)",
@@ -87,13 +102,12 @@ export function PriceChart() {
       priceLineWidth: 1,
       priceLineStyle: LineStyle.Dashed,
       lastValueVisible: true,
-      // Fix #4 — disable bottom-right price label
       crosshairMarkerVisible: true,
     });
-    // remove right-side price scale axis label duplicated? Keep last value on price line only
+
     chart.priceScale("right").applyOptions({ visible: true });
 
-    // seed with history
+    // ✅ Generate seed data as fallback (will be replaced by WebSocket history)
     const now = Math.floor(Date.now() / 1000);
     const seed: { time: UTCTimestamp; value: number }[] = [];
     let p = useApp.getState().price;
@@ -102,9 +116,13 @@ export function PriceChart() {
       seed.push({ time: (now - i) as UTCTimestamp, value: Number(p.toFixed(3)) });
     }
     series.setData(seed);
-    lastTimeRef.current = now - 1;
+
     chartRef.current = chart;
     seriesRef.current = series;
+    lastTimeRef.current = now - 1;
+    hasReceivedHistoryRef.current = false;
+    setIsReady(true);
+
     chart.timeScale().fitContent();
 
     // Right-anchored wheel zoom
@@ -127,31 +145,70 @@ export function PriceChart() {
       chart.remove();
       chartRef.current = null;
       seriesRef.current = null;
+      setIsReady(false);
     };
   }, [theme]);
 
-  // crosshair toggle
+  // ── Crosshair toggle ─────────────────────────────────────────────
   useEffect(() => {
     chartRef.current?.applyOptions({
-      crosshair: { mode: crosshairEnabled ? CrosshairMode.Normal : CrosshairMode.Hidden },
+      crosshair: { 
+        mode: crosshairEnabled ? CrosshairMode.Normal : CrosshairMode.Hidden 
+      },
     });
   }, [crosshairEnabled]);
 
-  // smooth updates
+  // ── ✅ Listen for WebSocket history data ────────────────────────
   useEffect(() => {
-    if (!seriesRef.current) return;
-    const t = Math.floor(Date.now() / 1000) as UTCTimestamp;
-    const nextTime = Math.max(lastTimeRef.current + 1, t);
-    lastTimeRef.current = nextTime;
-    seriesRef.current.update({ time: nextTime as UTCTimestamp, value: price });
-  }, [price]);
+    if (!ws || !seriesRef.current || !isReady) return;
 
-  // Entry markers — horizontal dashed line for each open trade
+    const handleHistory = (data: any) => {
+      if (data.symbol !== volatility) return;
+      
+      console.log('[Chart] Received history data:', data.ticks?.length || 0, 'ticks');
+      
+      if (data.ticks && data.ticks.length > 0) {
+        const chartData = data.ticks.map((tick: any) => ({
+          time: Math.floor(tick.timestamp / 1000) as UTCTimestamp,
+          value: tick.price,
+        }));
+        
+        // ✅ Replace seed data with real history
+        seriesRef.current?.setData(chartData);
+        chartRef.current?.timeScale().fitContent();
+        hasReceivedHistoryRef.current = true;
+        console.log('[Chart] Loaded history data:', chartData.length, 'points');
+      }
+    };
+
+    ws.on('history', handleHistory);
+
+    return () => {
+      ws.off('history', handleHistory);
+    };
+  }, [ws, volatility, isReady]);
+
+  // ── Smooth price updates ────────────────────────────────────────
+  useEffect(() => {
+    if (!seriesRef.current || !isReady) return;
+    
+    // If we haven't received history yet, use the price to seed
+    if (!hasReceivedHistoryRef.current) {
+      const t = Math.floor(Date.now() / 1000) as UTCTimestamp;
+      const nextTime = Math.max(lastTimeRef.current + 1, t);
+      lastTimeRef.current = nextTime;
+      seriesRef.current.update({ time: nextTime as UTCTimestamp, value: price });
+    }
+  }, [price, isReady]);
+
+  // ── Entry markers ────────────────────────────────────────────────
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
+    
     const lines = entryLinesRef.current;
     const openIds = new Set<string>();
+    
     for (const t of trades) {
       if (t.status === "open") {
         openIds.add(t.id);
@@ -170,7 +227,8 @@ export function PriceChart() {
         }
       }
     }
-    // remove lines for trades no longer open
+    
+    // Remove lines for trades no longer open
     for (const [id, line] of lines) {
       if (!openIds.has(id)) {
         try {
@@ -183,7 +241,7 @@ export function PriceChart() {
     }
   }, [trades]);
 
-  // expose zoom via window event
+  // ── Zoom controls via window event ──────────────────────────────
   useEffect(() => {
     const onZoom = (e: Event) => {
       const detail = (e as CustomEvent).detail as "in" | "out" | "fit";
@@ -195,7 +253,6 @@ export function PriceChart() {
       const span = range.to - range.from;
       const factor = detail === "in" ? 0.7 : 1.4;
       const newSpan = span * factor;
-      // anchor the RIGHT edge (most recent bar): keep `to`, change `from`
       ts.setVisibleLogicalRange({ from: range.to - newSpan, to: range.to });
     };
     window.addEventListener("gwave:zoom", onZoom as EventListener);
