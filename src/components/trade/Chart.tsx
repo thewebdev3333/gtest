@@ -158,7 +158,7 @@ export function PriceChart() {
     });
   }, [crosshairEnabled]);
 
-  // ── ✅ FIX: Reset chart state on volatility change ──────────────
+  // ── Reset chart state on volatility change ──────────────────────
   useEffect(() => {
     if (!seriesRef.current || !chartRef.current) return;
     
@@ -203,7 +203,7 @@ export function PriceChart() {
     if (!ws || !seriesRef.current || !isReady) return;
 
     const handleHistory = (data: any) => {
-      // ✅ Only process history for the current symbol
+      // Only process history for the current symbol
       if (data.symbol !== volatility) {
         console.log('[Chart] Ignoring history for', data.symbol, '(current:', volatility, ')');
         return;
@@ -219,6 +219,10 @@ export function PriceChart() {
         
         // Replace seed data with real history
         seriesRef.current?.setData(chartData);
+        
+        // ✅ FIX: Set lastTimeRef to the last historical timestamp
+        lastTimeRef.current = chartData[chartData.length - 1].time as number;
+        
         chartRef.current?.timeScale().fitContent();
         hasReceivedHistoryRef.current = true;
         console.log('[Chart] Loaded history data:', chartData.length, 'points for', data.symbol);
@@ -232,17 +236,15 @@ export function PriceChart() {
     };
   }, [ws, volatility, isReady]);
 
-  // ── Smooth price updates ────────────────────────────────────────
+  // ── ✅ FIX: Always forward live price changes to chart ──────────
   useEffect(() => {
     if (!seriesRef.current || !isReady) return;
     
-    // If we haven't received history yet, use the price to seed
-    if (!hasReceivedHistoryRef.current) {
-      const t = Math.floor(Date.now() / 1000) as UTCTimestamp;
-      const nextTime = Math.max(lastTimeRef.current + 1, t);
-      lastTimeRef.current = nextTime;
-      seriesRef.current.update({ time: nextTime as UTCTimestamp, value: price });
-    }
+    const t = Math.floor(Date.now() / 1000) as UTCTimestamp;
+    const nextTime = Math.max(lastTimeRef.current + 1, t) as UTCTimestamp;
+    lastTimeRef.current = nextTime;
+    seriesRef.current.update({ time: nextTime, value: price });
+    
   }, [price, isReady]);
 
   // ── Entry markers ────────────────────────────────────────────────
