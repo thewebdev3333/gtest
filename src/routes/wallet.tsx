@@ -28,8 +28,9 @@ function WalletPage() {
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
-  const [hasPending, setHasPending] = useState(false);
+  const [isPolling, setIsPolling] = useState(false);
   const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isPollingRef = useRef(false);
   
   const demoBalance = useApp((s) => s.demoBalance);
   const realBalance = useApp((s) => s.realBalance);
@@ -46,8 +47,14 @@ function WalletPage() {
         setTransactions(response.data.transactions);
         // Check if there are any pending transactions
         const hasPendingTx = response.data.transactions.some(tx => tx.status === 'pending');
-        setHasPending(hasPendingTx);
         console.log('[Wallet] Has pending transactions:', hasPendingTx);
+        
+        // Start or stop polling based on pending status
+        if (hasPendingTx && !isPollingRef.current) {
+          startPolling();
+        } else if (!hasPendingTx && isPollingRef.current) {
+          stopPolling();
+        }
       }
     } catch (err) {
       console.error('Failed to load transactions:', err);
@@ -80,9 +87,39 @@ function WalletPage() {
     }
   }, [fetchBalances, loadTransactions, loadWithdrawals]);
 
+  // Start polling for pending transactions
+  const startPolling = useCallback(() => {
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+    
+    console.log('[Wallet] Starting polling for pending transactions');
+    isPollingRef.current = true;
+    setIsPolling(true);
+    
+    // Poll immediately
+    pollPendingTransactions();
+    
+    // Then poll every 3 seconds
+    pollingIntervalRef.current = setInterval(pollPendingTransactions, 3000);
+  }, []);
+
+  // Stop polling
+  const stopPolling = useCallback(() => {
+    if (pollingIntervalRef.current) {
+      console.log('[Wallet] Stopping polling');
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+    isPollingRef.current = false;
+    setIsPolling(false);
+  }, []);
+
   // Poll for pending transaction status
   const pollPendingTransactions = useCallback(async () => {
-    if (!isAuthenticated || !hasPending) {
+    if (!isAuthenticated) {
+      stopPolling();
       return;
     }
 
@@ -91,21 +128,25 @@ function WalletPage() {
       const response = await checkPendingTransactions();
       
       if (response.success && response.data.transactions.length > 0) {
+        let hasUpdates = false;
+        let stillPending = false;
+        
         // Update the transactions in the list
-        setTransactions(prev => 
-          prev.map(tx => {
-            const updated = response.data.transactions.find((t: PendingTransactionStatus) => t.id === tx.id);
-            if (updated && updated.status !== tx.status) {
-              console.log(`[Wallet] Transaction ${tx.id} status changed: ${tx.status} -> ${updated.status}`);
+        setTransactions(prev => {
+          const updated = prev.map(tx => {
+            const found = response.data.transactions.find((t: PendingTransactionStatus) => t.id === tx.id);
+            if (found && found.status !== tx.status) {
+              hasUpdates = true;
+              console.log(`[Wallet] Transaction ${tx.id} status changed: ${tx.status} -> ${found.status}`);
               
               // Show toast notification
-              if (updated.status === 'completed') {
+              if (found.status === 'completed') {
                 if (tx.type === 'deposit') {
                   toast.success(`Deposit of $${parseFloat(tx.amount_usd).toFixed(2)} completed!`);
                 } else if (tx.type === 'withdrawal') {
                   toast.success(`Withdrawal of $${parseFloat(tx.amount_usd).toFixed(2)} completed!`);
                 }
-              } else if (updated.status === 'failed') {
+              } else if (found.status === 'failed') {
                 if (tx.type === 'deposit') {
                   toast.error('Deposit failed. Please try again.');
                 } else if (tx.type === 'withdrawal') {
@@ -113,71 +154,74 @@ function WalletPage() {
                 }
               }
               
-              return { ...tx, status: updated.status };
+              return { ...tx, status: found.status };
             }
             return tx;
-          })
-        );
+          });
+          
+          // Check if there are still pending transactions
+          stillPending = updated.some(tx => tx.status === 'pending');
+          
+          return updated;
+        });
         
         // Refresh balances if any transaction was updated
-        if (response.data.transactions.some((t: PendingTransactionStatus) => t.status !== 'pending')) {
+        if (hasUpdates) {
           fetchBalances();
         }
         
-        // Check if there are still pending transactions
+        // Stop polling if no more pending transactions
+        if (!stillPending && isPollingRef.current) {
+          stopPolling();
+        }
+      } else {
+        // No pending transactions found in the response
+        // Check if we still have any pending in our local state
         const stillPending = transactions.some(tx => tx.status === 'pending');
-        setHasPending(stillPending);
-        
-        // If no more pending, stop polling
-        if (!stillPending && pollingIntervalRef.current) {
-          console.log('[Wallet] No pending transactions, stopping polling');
-          clearInterval(pollingIntervalRef.current);
-          pollingIntervalRef.current = null;
+        if (!stillPending && isPollingRef.current) {
+          stopPolling();
         }
       }
     } catch (err) {
       console.error('[Wallet] Failed to poll pending transactions:', err);
     }
-  }, [isAuthenticated, hasPending, transactions, fetchBalances]);
+  }, [isAuthenticated, transactions, fetchBalances, stopPolling]);
 
-  // Start/stop polling based on pending transactions
+  // Clean up polling on unmount
   useEffect(() => {
-    if (!isAuthenticated) {
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
-        pollingIntervalRef.current = null;
-      }
-      return;
-    }
-
-    if (hasPending) {
-      console.log('[Wallet] Starting polling for pending transactions');
-      // Poll immediately
-      pollPendingTransactions();
-      // Then poll every 3 seconds
-      pollingIntervalRef.current = setInterval(pollPendingTransactions, 3000);
-    } else {
-      if (pollingIntervalRef.current) {
-        console.log('[Wallet] No pending transactions, stopping polling');
-        clearInterval(pollingIntervalRef.current);
-        pollingIntervalRef.current = null;
-      }
-    }
-
     return () => {
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
         pollingIntervalRef.current = null;
       }
+      isPollingRef.current = false;
     };
-  }, [isAuthenticated, hasPending, pollPendingTransactions]);
+  }, []);
 
   // Initial load
   useEffect(() => {
     if (isAuthenticated) {
       loadData();
+    } else {
+      // Stop polling if not authenticated
+      if (isPollingRef.current) {
+        stopPolling();
+      }
     }
-  }, [isAuthenticated, loadData]);
+  }, [isAuthenticated, loadData, stopPolling]);
+
+  // Also check for pending transactions when the component mounts or when we return to the page
+  useEffect(() => {
+    if (isAuthenticated) {
+      // Check if there are pending transactions and start polling if needed
+      const hasPendingTx = transactions.some(tx => tx.status === 'pending');
+      if (hasPendingTx && !isPollingRef.current) {
+        startPolling();
+      } else if (!hasPendingTx && isPollingRef.current) {
+        stopPolling();
+      }
+    }
+  }, [transactions, isAuthenticated, startPolling, stopPolling]);
 
   const getTransactionStatusColor = (status: string) => {
     switch (status) {
@@ -234,7 +278,7 @@ function WalletPage() {
         <Card className="p-5">
           <div className="flex items-center justify-between mb-3">
             <h2 className="font-semibold">Recent Transactions</h2>
-            {hasPending && (
+            {isPolling && (
               <div className="flex items-center gap-2 text-xs text-yellow-500">
                 <span className="relative flex h-2 w-2">
                   <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-yellow-500 opacity-75" />
