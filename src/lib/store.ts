@@ -1,6 +1,6 @@
 // store.ts
 import { create } from "zustand";
-import { toast } from "sonner"; // ✅ Import toast at the top
+import { toast } from "sonner";
 import { 
   getMe, 
   getBalances, 
@@ -211,12 +211,19 @@ export const useApp = create<AppState>((set, get) => {
       set({ ws: null, isConnected: false });
     },
 
+    // ✅ FIX: Unsubscribe from previous symbol before subscribing to new one
     volatility: "v100_1s",
     setVolatility: (v) => {
-      set({ volatility: v });
+      const prev = get().volatility;
       const ws = get().ws;
+      if (ws && get().isConnected && prev !== v) {
+        ws.unsubscribe(prev);
+        console.log(`[Store] Unsubscribed from ${prev}`);
+      }
+      set({ volatility: v });
       if (ws && get().isConnected) {
         ws.subscribe(v);
+        console.log(`[Store] Subscribed to ${v}`);
       }
     },
     contract: "rise_fall",
@@ -408,8 +415,9 @@ export const useApp = create<AppState>((set, get) => {
       const token = getToken();
       wsInstance = new MarketWebSocket(token || undefined);
       
+      // ✅ FIX: Filter ticks by current symbol to prevent cross-contamination
       wsInstance.on('tick', (data) => {
-        if (data.price) {
+        if (data.price && data.symbol === get().volatility) {
           set((s) => ({
             price: data.price,
             prevPrice: s.price,
@@ -422,14 +430,9 @@ export const useApp = create<AppState>((set, get) => {
         get().fetchBalances();
       });
 
-      // Listen for transaction status updates from WebSocket
       wsInstance.on('transaction_updated', (data) => {
         console.log('[WS] Transaction updated:', data);
-        
-        // Refresh balances when a transaction updates
         get().fetchBalances();
-        
-        // Show toast notification based on status
         if (data.status === 'completed') {
           if (data.type === 'deposit') {
             toast.success(`Deposit of $${data.amount_usd.toFixed(2)} completed successfully!`);
@@ -451,10 +454,12 @@ export const useApp = create<AppState>((set, get) => {
         set({ isConnected: true });
         const symbol = get().volatility;
         wsInstance?.subscribe(symbol);
+        console.log(`[Store] WebSocket connected, subscribed to ${symbol}`);
       });
       
       wsInstance.on('disconnected', () => {
         set({ isConnected: false });
+        console.log('[Store] WebSocket disconnected');
       });
       
       set({ ws: wsInstance });

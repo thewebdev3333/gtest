@@ -107,7 +107,7 @@ export function PriceChart() {
 
     chart.priceScale("right").applyOptions({ visible: true });
 
-    // ✅ Generate seed data as fallback (will be replaced by WebSocket history)
+    // Generate seed data as fallback
     const now = Math.floor(Date.now() / 1000);
     const seed: { time: UTCTimestamp; value: number }[] = [];
     let p = useApp.getState().price;
@@ -158,14 +158,58 @@ export function PriceChart() {
     });
   }, [crosshairEnabled]);
 
-  // ── ✅ Listen for WebSocket history data ────────────────────────
+  // ── ✅ FIX: Reset chart state on volatility change ──────────────
+  useEffect(() => {
+    if (!seriesRef.current || !chartRef.current) return;
+    
+    console.log('[Chart] Volatility changed to:', volatility, '- Resetting chart');
+    
+    // Clear all data
+    seriesRef.current.setData([]);
+    
+    // Reset history flag and last time
+    hasReceivedHistoryRef.current = false;
+    lastTimeRef.current = Math.floor(Date.now() / 1000) - 1;
+    
+    // Remove all entry lines
+    for (const [id, line] of entryLinesRef.current) {
+      try {
+        seriesRef.current.removePriceLine(line);
+      } catch {
+        // ignore
+      }
+    }
+    entryLinesRef.current.clear();
+    
+    // Fit content to show empty state
+    chartRef.current.timeScale().fitContent();
+    
+    // Generate fresh seed data for the new symbol
+    const now = Math.floor(Date.now() / 1000);
+    const seed: { time: UTCTimestamp; value: number }[] = [];
+    let p = useApp.getState().price;
+    for (let i = 120; i > 0; i--) {
+      p += (Math.random() - 0.5) * 0.4;
+      seed.push({ time: (now - i) as UTCTimestamp, value: Number(p.toFixed(3)) });
+    }
+    seriesRef.current.setData(seed);
+    chartRef.current.timeScale().fitContent();
+    
+    console.log('[Chart] Chart reset complete for', volatility);
+  }, [volatility]);
+
+  // ── Listen for WebSocket history data ────────────────────────────
   useEffect(() => {
     if (!ws || !seriesRef.current || !isReady) return;
 
     const handleHistory = (data: any) => {
-      if (data.symbol !== volatility) return;
+      // ✅ Only process history for the current symbol
+      if (data.symbol !== volatility) {
+        console.log('[Chart] Ignoring history for', data.symbol, '(current:', volatility, ')');
+        return;
+      }
       
-      console.log('[Chart] Received history data:', data.ticks?.length || 0, 'ticks');
+      console.log('[Chart] Received history data:', data.ticks?.length || 0, 'ticks for', data.symbol);
       
       if (data.ticks && data.ticks.length > 0) {
         const chartData = data.ticks.map((tick: any) => ({
@@ -173,11 +217,11 @@ export function PriceChart() {
           value: tick.price,
         }));
         
-        // ✅ Replace seed data with real history
+        // Replace seed data with real history
         seriesRef.current?.setData(chartData);
         chartRef.current?.timeScale().fitContent();
         hasReceivedHistoryRef.current = true;
-        console.log('[Chart] Loaded history data:', chartData.length, 'points');
+        console.log('[Chart] Loaded history data:', chartData.length, 'points for', data.symbol);
       }
     };
 
