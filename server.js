@@ -365,6 +365,11 @@ async function start() {
   })
 }
 
+app.get('/wallet/pending/check', 
+  mw.authenticate, 
+  wallet.checkPendingTransactions
+)
+
 start().catch(err => {
   console.error('[G Wave] Boot failed:', err)
   process.exit(1)

@@ -3,44 +3,8 @@ const db = require('./database')
 const multer = require('multer')
 const path = require('path')
 const fs = require('fs')
-const crypto = require('crypto')  // ✅ Add this for generating UUIDs
+const crypto = require('crypto')
 const { getKycStatus } = require('./auth')
-
-// Get WebSocket server reference for broadcasting
-let wssInstance = null
-
-function setWebSocketServer(wss) {
-  wssInstance = wss
-  console.log('[Wallet] WebSocket server set for broadcasting')
-}
-
-// Helper to broadcast to a specific user
-function broadcastToUser(userId, message) {
-  if (!wssInstance) {
-    console.warn('[Wallet] No WebSocket server instance available')
-    return
-  }
-  
-  if (!userId) {
-    console.warn('[Wallet] No userId provided for broadcast')
-    return
-  }
-  
-  let broadcastCount = 0
-  
-  for (const client of wssInstance.clients) {
-    if (client.readyState === 1 && client.userId === userId) {
-      try {
-        client.send(JSON.stringify(message))
-        broadcastCount++
-      } catch (err) {
-        console.error('[Wallet] Failed to send to client:', err)
-      }
-    }
-  }
-  
-  console.log(`[Wallet] Broadcast to user ${userId}: ${message.event || message.type} (sent to ${broadcastCount} connections)`)
-}
 
 // Ensure upload directory exists
 const kycUploadPath = process.env.KYC_UPLOAD_PATH || './uploads/kyc'
@@ -52,7 +16,6 @@ if (!fs.existsSync(kycUploadPath)) {
 
 const PALPLUSS_BASE_URL = process.env.PALPLUSS_BASE_URL || 'https://api.palpluss.com/v1'
 const PALPLUSS_API_KEY = process.env.PALPLUSS_API_KEY
-const PALPLUSS_API_SECRET = process.env.PALPLUSS_API_SECRET
 const PALPLUSS_BASIC_AUTH_TOKEN = process.env.PALPLUSS_BASIC_AUTH_TOKEN
 
 function formatPhoneNumber(phone) {
@@ -173,8 +136,13 @@ async function initiateStkPush(phone, amountKES, reference, channelId = null) {
   }
 }
 
-async function checkTransactionStatus(transactionId) {
-  return await palplussRequest(`/transactions/${transactionId}`, 'GET')
+async function checkPalPlussTransactionStatus(palplussTransactionId) {
+  try {
+    return await palplussRequest(`/transactions/${palplussTransactionId}`, 'GET')
+  } catch (error) {
+    console.error('[PalPluss] Status check failed:', error.message)
+    return null
+  }
 }
 
 // ── Handler Functions ─────────────────────────────────────────────
@@ -262,6 +230,7 @@ async function depositMpesa(req, res, next) {
       })
     }
 
+    // Check for stale pending transactions
     const { data: pending } = await db.supabase
       .from('transactions')
       .select('id, reference, created_at')
@@ -294,11 +263,11 @@ async function depositMpesa(req, res, next) {
     const rate = await db.getExchangeRate('USD', 'KES')
     const amountUSD = parseFloat((amountKES / rate).toFixed(8))
 
-    // ✅ FIX: Generate reference BEFORE creating transaction
+    // Generate reference BEFORE creating transaction
     const txId = crypto.randomUUID()
     const reference = `GWAVE_DEP_${txId.substring(0, 8).toUpperCase()}`
 
-    // ✅ FIX: Create transaction with reference already set
+    // Create transaction with reference already set
     const tx = await db.createTransaction({
       id: txId,
       user_id: userId,
@@ -307,7 +276,7 @@ async function depositMpesa(req, res, next) {
       amount_kes: amountKES,
       method: 'mpesa',
       status: 'pending',
-      reference: reference,  // ✅ This is the key fix!
+      reference: reference,
     })
 
     let checkoutRequestId
@@ -325,9 +294,8 @@ async function depositMpesa(req, res, next) {
       })
     }
 
-    // ✅ Store the checkoutRequestId in a separate update (don't overwrite reference)
-    // We only update status and store the checkout ID as reference if we want
-    // But we already have our reference, so we can just update status
+    // Store the checkoutRequestId in the reference field (keep our reference too)
+    // We'll store it as a separate update
     await db.updateTransactionStatus(tx.id, 'pending', checkoutRequestId)
 
     if (req.idempotencyKey && req.idempotencyStore) {
@@ -362,16 +330,112 @@ async function depositMpesa(req, res, next) {
   }
 }
 
+// ── NEW: Check pending transaction status ─────────────────────────
+
+async function checkPendingTransactions(req, res, next) {
+  try {
+    const userId = req.user.id
+    
+    // Get all pending deposit transactions
+    const { data: pendingTxs, error } = await db.supabase
+      .from('transactions')
+      .select('id, reference, amount_usd, amount_kes, created_at')
+      .eq('user_id', userId)
+      .eq('type', 'deposit')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+
+    if (error) throw error
+
+    if (!pendingTxs || pendingTxs.length === 0) {
+      return res.json({ 
+        success: true, 
+        data: { transactions: [] } 
+      })
+    }
+
+    const updatedTransactions = []
+
+    for (const tx of pendingTxs) {
+      // Check if the transaction is older than 5 minutes
+      const createdAt = new Date(tx.created_at)
+      const now = new Date()
+      const ageMinutes = (now - createdAt) / 60000
+
+      if (ageMinutes > 5) {
+        // Mark as failed if older than 5 minutes
+        await db.updateTransactionStatus(tx.id, 'failed')
+        updatedTransactions.push({
+          id: tx.id,
+          status: 'failed',
+          amount_usd: tx.amount_usd,
+          amount_kes: tx.amount_kes,
+        })
+        console.log(`[Polling] Transaction ${tx.id} marked as failed (timeout)`)
+        continue
+      }
+
+      // Check with PalPluss if we have a reference
+      if (tx.reference) {
+        try {
+          const result = await checkPalPlussTransactionStatus(tx.reference)
+          
+          if (result) {
+            const isSuccess = result.result_code === '0' || result.status === 'SUCCESS'
+            const isFailed = result.result_code !== '0' || result.status === 'FAILED' || result.status === 'CANCELLED'
+
+            if (isSuccess && tx.status === 'pending') {
+              await db.updateTransactionStatus(tx.id, 'completed', tx.reference)
+              
+              // Credit the account
+              const account = await db.getAccountByUserAndType(userId, 'real')
+              await db.addBalance(account.id, parseFloat(tx.amount_usd))
+              
+              updatedTransactions.push({
+                id: tx.id,
+                status: 'completed',
+                amount_usd: tx.amount_usd,
+                amount_kes: tx.amount_kes,
+              })
+              console.log(`[Polling] Transaction ${tx.id} marked as completed`)
+            } else if (isFailed && tx.status === 'pending') {
+              await db.updateTransactionStatus(tx.id, 'failed', tx.reference)
+              updatedTransactions.push({
+                id: tx.id,
+                status: 'failed',
+                amount_usd: tx.amount_usd,
+                amount_kes: tx.amount_kes,
+              })
+              console.log(`[Polling] Transaction ${tx.id} marked as failed`)
+            }
+          }
+        } catch (err) {
+          console.error(`[Polling] Failed to check transaction ${tx.id}:`, err.message)
+        }
+      }
+    }
+
+    res.json({ 
+      success: true, 
+      data: { 
+        transactions: updatedTransactions,
+        hasPending: pendingTxs.length > 0
+      } 
+    })
+  } catch (err) {
+    console.error('[Polling] Error:', err)
+    next(err)
+  }
+}
+
+// ── Webhook Callback (simplified - just updates DB, no broadcast) ──
+
 async function palplussCallback(req, res, next) {
   try {
     const payload = req.body
     console.log('[PalPluss] Webhook received:', JSON.stringify(payload, null, 2))
     
-    const { 
-      event,
-      event_type,
-      transaction 
-    } = payload
+    const { transaction } = payload
 
     if (!transaction || !transaction.id) {
       console.warn('[PalPluss] Invalid webhook payload - missing transaction')
@@ -381,9 +445,6 @@ async function palplussCallback(req, res, next) {
     const { 
       id: palplussTransactionId,
       status,
-      amount,
-      currency,
-      phone_number,
       result_code,
       result_desc,
       external_reference
@@ -391,7 +452,6 @@ async function palplussCallback(req, res, next) {
 
     console.log('[PalPluss] Looking up transaction by external_reference:', external_reference)
 
-    // ✅ FIX: Look up by external_reference (our GWAVE_DEP_XXX reference)
     let tx = null
     
     if (external_reference) {
@@ -401,7 +461,6 @@ async function palplussCallback(req, res, next) {
       }
     }
     
-    // If not found by external_reference, try by the PalPluss transaction ID
     if (!tx) {
       console.log('[PalPluss] Trying to find by PalPluss transaction ID:', palplussTransactionId)
       tx = await db.getTransactionByReference(palplussTransactionId)
@@ -420,43 +479,18 @@ async function palplussCallback(req, res, next) {
     const isSuccess = result_code === '0' || status === 'SUCCESS'
     const isFailed = result_code !== '0' || status === 'FAILED' || status === 'CANCELLED'
 
-    let transactionUpdated = false
-    let newStatus = tx.status
-
-    if (isSuccess) {
-      if (tx.status !== 'completed') {
-        await db.updateTransactionStatus(tx.id, 'completed', palplussTransactionId)
-        newStatus = 'completed'
-        transactionUpdated = true
-        console.log(`[PalPluss] Transaction ${tx.id} marked as completed`)
-        
-        if (tx.type === 'deposit') {
-          const account = await db.getAccountByUserAndType(tx.user_id, 'real')
-          await db.addBalance(account.id, parseFloat(tx.amount_usd))
-          console.log(`[PalPluss] Credited ${tx.amount_usd} USD to account ${account.id}`)
-        }
-      }
-    } else if (isFailed) {
-      if (tx.status !== 'failed') {
-        await db.updateTransactionStatus(tx.id, 'failed', palplussTransactionId)
-        newStatus = 'failed'
-        transactionUpdated = true
-        console.log(`[PalPluss] Transaction ${tx.id} marked as failed: ${result_desc || status}`)
-      }
-    }
-
-    if (transactionUpdated) {
-      broadcastToUser(tx.user_id, {
-        event: 'transaction_updated',
-        transactionId: tx.id,
-        status: newStatus,
-        type: tx.type,
-        amount_usd: parseFloat(tx.amount_usd),
-        amount_kes: tx.amount_kes,
-        reference: palplussTransactionId,
-      })
+    if (isSuccess && tx.status === 'pending') {
+      await db.updateTransactionStatus(tx.id, 'completed', palplussTransactionId)
+      console.log(`[PalPluss] Transaction ${tx.id} marked as completed`)
       
-      console.log(`[PalPluss] Broadcast transaction update to user ${tx.user_id}: ${newStatus}`)
+      if (tx.type === 'deposit') {
+        const account = await db.getAccountByUserAndType(tx.user_id, 'real')
+        await db.addBalance(account.id, parseFloat(tx.amount_usd))
+        console.log(`[PalPluss] Credited ${tx.amount_usd} USD to account ${account.id}`)
+      }
+    } else if (isFailed && tx.status === 'pending') {
+      await db.updateTransactionStatus(tx.id, 'failed', palplussTransactionId)
+      console.log(`[PalPluss] Transaction ${tx.id} marked as failed: ${result_desc || status}`)
     }
 
     res.status(200).json({ 
@@ -475,7 +509,7 @@ async function palplussCallback(req, res, next) {
   }
 }
 
-// ── Rest of the file (unchanged) ────────────────────────────────
+// ── Manual completion for testing ─────────────────────────────────
 
 async function completeTransactionManually(req, res, next) {
   try {
@@ -522,15 +556,6 @@ async function completeTransactionManually(req, res, next) {
       console.log(`[Test] Manually completed deposit ${tx.id} - Credited ${tx.amount_usd} USD`)
     }
 
-    broadcastToUser(tx.user_id, {
-      event: 'transaction_updated',
-      transactionId: tx.id,
-      status: 'completed',
-      type: tx.type,
-      amount_usd: parseFloat(tx.amount_usd),
-      amount_kes: tx.amount_kes,
-    })
-
     res.json({
       success: true,
       data: {
@@ -546,6 +571,8 @@ async function completeTransactionManually(req, res, next) {
     next(err) 
   }
 }
+
+// ── Withdrawal ─────────────────────────────────────────────────────
 
 async function withdrawMpesa(req, res, next) {
   try {
@@ -774,7 +801,6 @@ module.exports = {
   initiateStkPush,
   checkTransactionStatus,
   completeTransactionManually,
-  setWebSocketServer,
-  broadcastToUser,
+  checkPendingTransactions,
   formatPhoneNumber,
 }
