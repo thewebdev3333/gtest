@@ -1,4 +1,4 @@
-// trade.tsx - Add Auto Trade tab alongside TradeControls
+// trade.tsx
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
@@ -6,8 +6,9 @@ import { PriceChart } from "@/components/trade/Chart";
 import { ContractSelector } from "@/components/trade/ContractSelector";
 import { VolatilityIndicator } from "@/components/trade/VolatilityIndicator";
 import { TradeControls } from "@/components/trade/TradeControls";
-import { AutoTradeControls } from "@/components/trade/AutoTradeControls"; // ✅ Import
+import { AutoTradeControls } from "@/components/trade/AutoTradeControls";
 import { Positions } from "@/components/trade/Positions";
+import { AutoTradeResultModal } from "@/components/trade/AutoTradeResultModal";
 import { useApp, formatMoney } from "@/lib/store";
 import { useTickEngine } from "@/lib/tick-engine";
 import { Plus, Minus, Eye, EyeOff, ChevronDown } from "lucide-react";
@@ -44,6 +45,10 @@ function TradePage() {
   const currency = useApp((s) => s.currency);
   const fxRate = useApp((s) => s.fxRate);
   const totalPnl = trades.reduce((a, t) => a + (t.pnl ?? 0), 0);
+  
+  // Auto Trade Result Modal
+  const autoTradeResult = useApp((s) => s.autoTradeResult);
+  const hideAutoTradeResult = useApp((s) => s.hideAutoTradeResult);
 
   const zoom = (dir: "in" | "out" | "fit") =>
     window.dispatchEvent(new CustomEvent("gwave:zoom", { detail: dir }));
@@ -152,6 +157,19 @@ function TradePage() {
           </div>
         </aside>
       </div>
+
+      {/* Auto Trade Result Modal */}
+      {autoTradeResult.result && (
+        <AutoTradeResultModal
+          open={autoTradeResult.show}
+          onOpenChange={hideAutoTradeResult}
+          result={{
+            ...autoTradeResult.result,
+            currency,
+            fxRate,
+          }}
+        />
+      )}
     </AppShell>
   );
 }

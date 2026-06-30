@@ -80,12 +80,30 @@ export interface AutoTradeConfig {
   stopLoss: number;
   takeProfit: number;
   maxTrades?: number;
+  durationMs: number;
+  durationUnit: DurationUnit;
+  durationVal: number;
+  barrier?: number;
   isRunning: boolean;
   totalPnl: number;
   tradesCount: number;
   wins: number;
   losses: number;
   startedAt: number | null;
+}
+
+export interface AutoTradeResult {
+  reason: 'take_profit' | 'stop_loss' | 'max_trades' | 'manual_stop' | 'insufficient_balance' | 'error';
+  totalPnl: number;
+  tradesCount: number;
+  wins: number;
+  losses: number;
+  startedAt: number | null;
+  stoppedAt: number;
+  direction?: string;
+  contract?: string;
+  stopLoss?: number;
+  takeProfit?: number;
 }
 
 interface AppState {
@@ -144,6 +162,14 @@ interface AppState {
   placeAutoTrade: () => Promise<void>;
   handleAutoTradeSettlement: (trade: Trade) => void;
   
+  // Auto Trade Result Modal
+  autoTradeResult: {
+    show: boolean;
+    result: AutoTradeResult | null;
+  };
+  showAutoTradeResult: (result: AutoTradeResult) => void;
+  hideAutoTradeResult: () => void;
+  
   // Data fetching
   fetchUserData: () => Promise<void>;
   fetchBalances: () => Promise<void>;
@@ -162,8 +188,6 @@ interface AppState {
 
 const STORAGE_KEY = "gwave_prefs_v1";
 const AUTH_KEY = "gwave_auth";
-
-// ── Persistence Helpers ──────────────────────────────────────────
 
 function loadPrefs(): Partial<Pick<AppState, "theme" | "currency" | "account" | "demoBalance" | "realBalance">> {
   if (typeof window === "undefined") return {};
@@ -211,6 +235,10 @@ const initialAutoTrade: AutoTradeConfig = {
   stopLoss: 20,
   takeProfit: 10,
   maxTrades: undefined,
+  durationMs: 10000,
+  durationUnit: "ticks",
+  durationVal: 10,
+  barrier: undefined,
   isRunning: false,
   totalPnl: 0,
   tradesCount: 0,
@@ -219,7 +247,10 @@ const initialAutoTrade: AutoTradeConfig = {
   startedAt: null,
 };
 
-// ── Store ──────────────────────────────────────────────────────────
+const initialAutoTradeResult = {
+  show: false,
+  result: null,
+};
 
 export const useApp = create<AppState>((set, get) => {
   const prefs = loadPrefs();
@@ -330,10 +361,11 @@ export const useApp = create<AppState>((set, get) => {
       savePrefs(get());
       return trade;
     },
+
     settleTrade: (id, exitPrice) => {
       const t = get().trades.find((x) => x.id === id);
       if (!t || t.status !== "open") return;
-      
+
       let won = false;
       const lastDigit = Math.floor(exitPrice * 100) % 10;
       switch (t.direction) {
@@ -362,24 +394,24 @@ export const useApp = create<AppState>((set, get) => {
           won = lastDigit % 2 === 1;
           break;
       }
+
       const pnl = won ? t.payout - t.stake : -t.stake;
       const credit = won ? t.payout : 0;
       const balKey = get().account === "demo" ? "demoBalance" : "realBalance";
-      
+
+      // Build the updated trade object once
+      const updatedTrade: Trade = { ...t, status: won ? "won" : "lost", exitPrice, pnl };
+
       set((s) => ({
-        trades: s.trades.map((x) =>
-          x.id === id
-            ? { ...x, status: won ? "won" : "lost", exitPrice, pnl }
-            : x,
-        ),
+        trades: s.trades.map((x) => (x.id === id ? updatedTrade : x)),
         [balKey]: (s[balKey] as number) + credit,
       }) as Partial<AppState>);
       savePrefs(get());
-      
-      // ✅ Auto Trade: Check if this trade was part of auto trading
+
+      // Auto Trade: Pass the updated trade with pnl
       const autoTrade = get().autoTrade;
       if (autoTrade.isRunning) {
-        get().handleAutoTradeSettlement(t);
+        get().handleAutoTradeSettlement(updatedTrade);
       }
     },
 
@@ -399,6 +431,20 @@ export const useApp = create<AppState>((set, get) => {
 
     // ── Auto Trade ────────────────────────────────────────────────
     autoTrade: initialAutoTrade,
+    autoTradeResult: initialAutoTradeResult,
+
+    showAutoTradeResult: (result) => {
+      set({ 
+        autoTradeResult: { 
+          show: true, 
+          result: { ...result, stoppedAt: Date.now() } 
+        } 
+      });
+    },
+
+    hideAutoTradeResult: () => {
+      set({ autoTradeResult: { show: false, result: null } });
+    },
 
     startAutoTrade: (config) => {
       const state = get();
@@ -430,6 +476,10 @@ export const useApp = create<AppState>((set, get) => {
           losses: 0,
           startedAt: Date.now(),
           stake: stake,
+          durationMs: config.durationMs || current.durationMs,
+          durationUnit: config.durationUnit || current.durationUnit,
+          durationVal: config.durationVal || current.durationVal,
+          barrier: config.barrier !== undefined ? config.barrier : current.barrier,
         }
       });
       
@@ -437,7 +487,6 @@ export const useApp = create<AppState>((set, get) => {
         description: `Direction: ${config.direction || current.direction} · Stop Loss: $${config.stopLoss || current.stopLoss} · Take Profit: $${config.takeProfit || current.takeProfit}`
       });
       
-      // Place first trade immediately
       setTimeout(() => {
         get().placeAutoTrade();
       }, 500);
@@ -447,7 +496,23 @@ export const useApp = create<AppState>((set, get) => {
       const current = get().autoTrade;
       if (!current.isRunning) return;
       
-      const duration = current.startedAt ? Math.round((Date.now() - current.startedAt) / 1000 / 60) : 0;
+      const stoppedAt = Date.now();
+      const duration = current.startedAt ? Math.round((stoppedAt - current.startedAt) / 1000 / 60) : 0;
+      
+      // Show result modal for manual stop
+      get().showAutoTradeResult({
+        reason: 'manual_stop',
+        totalPnl: current.totalPnl,
+        tradesCount: current.tradesCount,
+        wins: current.wins,
+        losses: current.losses,
+        startedAt: current.startedAt,
+        stoppedAt: stoppedAt,
+        direction: current.direction,
+        contract: current.contract,
+        stopLoss: current.stopLoss,
+        takeProfit: current.takeProfit,
+      });
       
       set({
         autoTrade: {
@@ -468,26 +533,66 @@ export const useApp = create<AppState>((set, get) => {
       const { autoTrade } = state;
       
       if (!autoTrade.isRunning) {
+        console.log('[Auto Trade] Not running, skipping');
         return;
       }
       
-      // Check if we've reached stop loss
+      // Check stop loss
       if (autoTrade.totalPnl <= -autoTrade.stopLoss) {
-        toast.error(`Auto Trading stopped: Stop Loss hit (${formatMoney(autoTrade.totalPnl, state.currency, state.fxRate)})`);
+        const stoppedAt = Date.now();
+        get().showAutoTradeResult({
+          reason: 'stop_loss',
+          totalPnl: autoTrade.totalPnl,
+          tradesCount: autoTrade.tradesCount,
+          wins: autoTrade.wins,
+          losses: autoTrade.losses,
+          startedAt: autoTrade.startedAt,
+          stoppedAt: stoppedAt,
+          direction: autoTrade.direction,
+          contract: autoTrade.contract,
+          stopLoss: autoTrade.stopLoss,
+          takeProfit: autoTrade.takeProfit,
+        });
         state.stopAutoTrade();
         return;
       }
       
-      // Check if we've reached take profit
+      // Check take profit
       if (autoTrade.totalPnl >= autoTrade.takeProfit) {
-        toast.success(`Auto Trading finished: Take Profit hit (${formatMoney(autoTrade.totalPnl, state.currency, state.fxRate)}) 🎉`);
+        const stoppedAt = Date.now();
+        get().showAutoTradeResult({
+          reason: 'take_profit',
+          totalPnl: autoTrade.totalPnl,
+          tradesCount: autoTrade.tradesCount,
+          wins: autoTrade.wins,
+          losses: autoTrade.losses,
+          startedAt: autoTrade.startedAt,
+          stoppedAt: stoppedAt,
+          direction: autoTrade.direction,
+          contract: autoTrade.contract,
+          stopLoss: autoTrade.stopLoss,
+          takeProfit: autoTrade.takeProfit,
+        });
         state.stopAutoTrade();
         return;
       }
       
       // Check max trades
       if (autoTrade.maxTrades && autoTrade.tradesCount >= autoTrade.maxTrades) {
-        toast.info(`Auto Trading finished: Max trades (${autoTrade.maxTrades}) reached`);
+        const stoppedAt = Date.now();
+        get().showAutoTradeResult({
+          reason: 'max_trades',
+          totalPnl: autoTrade.totalPnl,
+          tradesCount: autoTrade.tradesCount,
+          wins: autoTrade.wins,
+          losses: autoTrade.losses,
+          startedAt: autoTrade.startedAt,
+          stoppedAt: stoppedAt,
+          direction: autoTrade.direction,
+          contract: autoTrade.contract,
+          stopLoss: autoTrade.stopLoss,
+          takeProfit: autoTrade.takeProfit,
+        });
         state.stopAutoTrade();
         return;
       }
@@ -496,34 +601,49 @@ export const useApp = create<AppState>((set, get) => {
       const balKey = state.account === "demo" ? "demoBalance" : "realBalance";
       const balance = state[balKey] as number;
       if (balance < autoTrade.stake) {
-        toast.error("Auto Trading stopped: Insufficient balance");
+        const stoppedAt = Date.now();
+        get().showAutoTradeResult({
+          reason: 'insufficient_balance',
+          totalPnl: autoTrade.totalPnl,
+          tradesCount: autoTrade.tradesCount,
+          wins: autoTrade.wins,
+          losses: autoTrade.losses,
+          startedAt: autoTrade.startedAt,
+          stoppedAt: stoppedAt,
+          direction: autoTrade.direction,
+          contract: autoTrade.contract,
+          stopLoss: autoTrade.stopLoss,
+          takeProfit: autoTrade.takeProfit,
+        });
         state.stopAutoTrade();
         return;
       }
       
-      // Place the trade
+      // Calculate payout
+      const payout = autoTrade.stake * PAYOUT_MULTIPLIER[autoTrade.contract];
+      const durationMs = autoTrade.durationMs;
+      const currentPrice = state.price;
+      
+      // Prepare trade data
+      const tradeData: Omit<Trade, "id" | "status" | "entryAt" | "expiresAt"> & { entryAt?: number } = {
+        contract: autoTrade.contract,
+        direction: autoTrade.direction,
+        volatility: autoTrade.volatility,
+        stake: autoTrade.stake,
+        payout: payout,
+        durationMs: durationMs,
+        entryPrice: currentPrice,
+      };
+      
+      if (autoTrade.barrier !== undefined) {
+        tradeData.barrier = autoTrade.barrier;
+      }
+      
       try {
-        const payout = autoTrade.stake * PAYOUT_MULTIPLIER[autoTrade.contract];
-        const durationMs = 60000; // 1 minute default
+        const trade = state.openTrade(tradeData);
         
-        // Get current price
-        const currentPrice = state.price;
+        console.log(`[Auto Trade] Placed trade #${autoTrade.tradesCount + 1}: ${trade.id} ${autoTrade.direction} @ ${trade.entryPrice} (${durationMs}ms)`);
         
-        // Open the trade
-        const trade = state.openTrade({
-          contract: autoTrade.contract,
-          direction: autoTrade.direction,
-          volatility: autoTrade.volatility,
-          stake: autoTrade.stake,
-          payout: payout,
-          durationMs: durationMs,
-          entryPrice: currentPrice,
-          ...(autoTrade.contract === "over_under" || autoTrade.contract === "match_differ" ? { barrier: 5 } : {}),
-        });
-        
-        console.log(`[Auto Trade] Placed trade #${autoTrade.tradesCount + 1}: ${trade.id} ${autoTrade.direction} @ ${trade.entryPrice}`);
-        
-        // Update trades count
         set((s) => ({
           autoTrade: {
             ...s.autoTrade,
@@ -533,7 +653,20 @@ export const useApp = create<AppState>((set, get) => {
         
       } catch (err) {
         console.error('[Auto Trade] Error placing trade:', err);
-        toast.error('Failed to place auto trade');
+        const stoppedAt = Date.now();
+        get().showAutoTradeResult({
+          reason: 'error',
+          totalPnl: autoTrade.totalPnl,
+          tradesCount: autoTrade.tradesCount,
+          wins: autoTrade.wins,
+          losses: autoTrade.losses,
+          startedAt: autoTrade.startedAt,
+          stoppedAt: stoppedAt,
+          direction: autoTrade.direction,
+          contract: autoTrade.contract,
+          stopLoss: autoTrade.stopLoss,
+          takeProfit: autoTrade.takeProfit,
+        });
         state.stopAutoTrade();
       }
     },
@@ -544,11 +677,13 @@ export const useApp = create<AppState>((set, get) => {
       
       if (!autoTrade.isRunning) return;
       
-      const pnl = trade.pnl || 0;
+      const pnl = trade.pnl ?? 0;
       const newTotalPnl = autoTrade.totalPnl + pnl;
       
       const wins = pnl > 0 ? autoTrade.wins + 1 : autoTrade.wins;
       const losses = pnl <= 0 ? autoTrade.losses + 1 : autoTrade.losses;
+      
+      console.log(`[Auto Trade] Trade settled: ${trade.id} | P&L: ${pnl} | Total P&L: ${newTotalPnl} | Win: ${pnl > 0}`);
       
       set((s) => ({
         autoTrade: {
@@ -559,16 +694,42 @@ export const useApp = create<AppState>((set, get) => {
         }
       }));
       
-      // Check if we hit stop loss
+      // Check stop loss
       if (newTotalPnl <= -autoTrade.stopLoss) {
-        toast.error(`Auto Trading stopped: Stop Loss hit (${formatMoney(newTotalPnl, state.currency, state.fxRate)})`);
+        const stoppedAt = Date.now();
+        get().showAutoTradeResult({
+          reason: 'stop_loss',
+          totalPnl: newTotalPnl,
+          tradesCount: autoTrade.tradesCount,
+          wins: wins,
+          losses: losses,
+          startedAt: autoTrade.startedAt,
+          stoppedAt: stoppedAt,
+          direction: autoTrade.direction,
+          contract: autoTrade.contract,
+          stopLoss: autoTrade.stopLoss,
+          takeProfit: autoTrade.takeProfit,
+        });
         state.stopAutoTrade();
         return;
       }
       
-      // Check if we hit take profit
+      // Check take profit
       if (newTotalPnl >= autoTrade.takeProfit) {
-        toast.success(`Auto Trading finished: Take Profit hit (${formatMoney(newTotalPnl, state.currency, state.fxRate)}) 🎉`);
+        const stoppedAt = Date.now();
+        get().showAutoTradeResult({
+          reason: 'take_profit',
+          totalPnl: newTotalPnl,
+          tradesCount: autoTrade.tradesCount,
+          wins: wins,
+          losses: losses,
+          startedAt: autoTrade.startedAt,
+          stoppedAt: stoppedAt,
+          direction: autoTrade.direction,
+          contract: autoTrade.contract,
+          stopLoss: autoTrade.stopLoss,
+          takeProfit: autoTrade.takeProfit,
+        });
         state.stopAutoTrade();
         return;
       }
@@ -759,8 +920,6 @@ export const useApp = create<AppState>((set, get) => {
     },
   };
 });
-
-// ── Helper ──────────────────────────────────────────────────────
 
 export function formatMoney(usd: number, currency: Currency, fxRate: number): string {
   const v = currency === "USD" ? usd : usd * fxRate;

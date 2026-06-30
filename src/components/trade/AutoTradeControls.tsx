@@ -1,13 +1,66 @@
 // src/components/trade/AutoTradeControls.tsx
 import { useState, useEffect } from "react";
-import { useApp, CONTRACTS, NEGATIVE_DIRECTIONS, formatMoney, type Direction, type ContractType, type VolatilityId } from "@/lib/store";
+import { useApp, CONTRACTS, NEGATIVE_DIRECTIONS, formatMoney, type Direction, type ContractType, type DurationUnit } from "@/lib/store";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Switch } from "@/components/ui/switch";
-import { Play, Square, TrendingUp, TrendingDown, AlertCircle } from "lucide-react";
+import { Play, Square, TrendingUp, TrendingDown, AlertCircle, Clock } from "lucide-react";
 import { toast } from "sonner";
+
+const UNIT_LABELS: Record<DurationUnit, string> = {
+  ticks: "Ticks",
+  seconds: "Seconds",
+  minutes: "Minutes",
+  hours: "Hours",
+};
+
+const UNIT_TO_MS: Record<DurationUnit, number> = {
+  ticks: 1000,    // 1 tick = 1 second
+  seconds: 1000,
+  minutes: 60000,
+  hours: 3600000,
+};
+
+// ✅ Expanded ranges for more flexibility
+const UNIT_MAX: Record<DurationUnit, number> = {
+  ticks: 100,     // 100 ticks = 100 seconds = 1.67 minutes
+  seconds: 300,   // 5 minutes
+  minutes: 60,    // 60 minutes = 1 hour
+  hours: 24,      // 24 hours
+};
+
+const UNIT_MIN: Record<DurationUnit, number> = {
+  ticks: 1,
+  seconds: 5,
+  minutes: 1,
+  hours: 1,
+};
+
+const STAKE_PRESETS = [2, 5, 10, 25, 50];
+
+const ALLOWED_UNITS: Record<ContractType, DurationUnit[]> = {
+  rise_fall: ["ticks", "seconds", "minutes", "hours"],
+  over_under: ["ticks"],
+  match_differ: ["ticks"],
+  even_odd: ["ticks"],
+};
+
+const DEFAULT_UNIT: Record<ContractType, DurationUnit> = {
+  rise_fall: "seconds",
+  over_under: "ticks",
+  match_differ: "ticks",
+  even_odd: "ticks",
+};
+
+const DEFAULT_DURATION: Record<ContractType, number> = {
+  rise_fall: 30,
+  over_under: 10,
+  match_differ: 10,
+  even_odd: 10,
+};
+
+const DIGIT_OPTIONS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 export function AutoTradeControls() {
   const autoTrade = useApp((s) => s.autoTrade);
@@ -18,18 +71,77 @@ export function AutoTradeControls() {
   const realBalance = useApp((s) => s.realBalance);
   const currency = useApp((s) => s.currency);
   const fxRate = useApp((s) => s.fxRate);
+  const setContract = useApp((s) => s.setContract);
 
   const [direction, setDirection] = useState<Direction>("rise");
-  const [contract, setContract] = useState<ContractType>("rise_fall");
+  const [contract, setContractLocal] = useState<ContractType>("rise_fall");
+  const [durationUnit, setDurationUnit] = useState<DurationUnit>("seconds");
+  const [durationVal, setDurationVal] = useState<number>(30);
   const [stake, setStake] = useState<number>(5);
   const [stopLoss, setStopLoss] = useState<number>(20);
   const [takeProfit, setTakeProfit] = useState<number>(10);
+  const [barrier, setBarrier] = useState<number>(5);
 
   const balance = account === "demo" ? demoBalance : realBalance;
   const isRunning = autoTrade.isRunning;
 
+  const allowedUnits = ALLOWED_UNITS[contract] || ["ticks"];
+
+  const handleContractChange = (c: ContractType) => {
+    setContractLocal(c);
+    setContract(c);
+    
+    const defaultUnit = DEFAULT_UNIT[c];
+    const defaultDuration = DEFAULT_DURATION[c];
+    setDurationUnit(defaultUnit);
+    setDurationVal(defaultDuration);
+    
+    if (c !== "over_under" && c !== "match_differ") {
+      setBarrier(5);
+    }
+  };
+
+  const contractOptions = CONTRACTS;
+
+  const getDirectionOptions = (c: ContractType) => {
+    switch (c) {
+      case "rise_fall":
+        return [
+          { id: "rise", label: "Rise", icon: TrendingUp, color: "text-primary" },
+          { id: "fall", label: "Fall", icon: TrendingDown, color: "text-destructive" },
+        ];
+      case "over_under":
+        return [
+          { id: "over", label: "Over", icon: TrendingUp, color: "text-primary" },
+          { id: "under", label: "Under", icon: TrendingDown, color: "text-destructive" },
+        ];
+      case "match_differ":
+        return [
+          { id: "match", label: "Match", icon: TrendingUp, color: "text-primary" },
+          { id: "differ", label: "Differ", icon: TrendingDown, color: "text-destructive" },
+        ];
+      case "even_odd":
+        return [
+          { id: "even", label: "Even", icon: TrendingUp, color: "text-primary" },
+          { id: "odd", label: "Odd", icon: TrendingDown, color: "text-destructive" },
+        ];
+    }
+  };
+
+  useEffect(() => {
+    const dirs = getDirectionOptions(contract);
+    const currentExists = dirs.some(d => d.id === direction);
+    if (!currentExists && dirs.length > 0) {
+      setDirection(dirs[0].id as Direction);
+    }
+    if (contract !== "over_under" && contract !== "match_differ") {
+      setBarrier(5);
+    }
+  }, [contract]);
+
+  const showBarrier = contract === "over_under" || contract === "match_differ";
+
   const handleStart = () => {
-    // Validation
     if (stake < 1) {
       toast.error("Minimum stake is $1");
       return;
@@ -39,13 +151,17 @@ export function AutoTradeControls() {
       return;
     }
     if (stopLoss < stake) {
-      toast.error(`Stop Loss (${formatMoney(stopLoss, currency, fxRate)}) must be greater than stake (${formatMoney(stake, currency, fxRate)})`);
+      toast.error(`Stop Loss (${formatMoney(stopLoss, currency, fxRate)}) must be greater than or equal to stake (${formatMoney(stake, currency, fxRate)})`);
       return;
     }
     if (takeProfit < stake) {
-      toast.error(`Take Profit (${formatMoney(takeProfit, currency, fxRate)}) must be greater than stake (${formatMoney(stake, currency, fxRate)})`);
+      toast.error(`Take Profit (${formatMoney(takeProfit, currency, fxRate)}) must be greater than or equal to stake (${formatMoney(stake, currency, fxRate)})`);
       return;
     }
+
+    const durationMs = durationVal * UNIT_TO_MS[durationUnit];
+    
+    console.log(`[Auto Trade] Starting with duration: ${durationVal} ${durationUnit} = ${durationMs}ms`);
 
     startAutoTrade({
       direction,
@@ -53,6 +169,10 @@ export function AutoTradeControls() {
       stake,
       stopLoss,
       takeProfit,
+      durationMs,
+      durationUnit,
+      durationVal,
+      barrier: showBarrier ? barrier : undefined,
     });
   };
 
@@ -60,15 +180,19 @@ export function AutoTradeControls() {
     stopAutoTrade();
   };
 
-  const dirs = [
-    { id: "rise", label: "Rise", icon: TrendingUp, color: "text-primary" },
-    { id: "fall", label: "Fall", icon: TrendingDown, color: "text-destructive" },
-  ] as const;
+  const dirs = getDirectionOptions(contract);
+
+  // Format duration display
+  const getDurationDisplay = () => {
+    if (durationUnit === "ticks") {
+      return `${durationVal} ticks = ${durationVal}s`;
+    }
+    return `${durationVal} ${durationUnit}`;
+  };
 
   return (
     <div className="space-y-4">
       {isRunning ? (
-        // Running state
         <Card className="p-4 border-primary/30 bg-primary/5">
           <div className="flex items-center justify-between">
             <div>
@@ -81,6 +205,7 @@ export function AutoTradeControls() {
               </div>
               <div className="mt-1 text-sm text-muted-foreground">
                 {autoTrade.direction.toUpperCase()} · {autoTrade.contract.replace('_', ' ')}
+                {autoTrade.barrier !== undefined && ` · Digit: ${autoTrade.barrier}`}
               </div>
             </div>
             <Button variant="destructive" size="sm" onClick={handleStop}>
@@ -111,45 +236,22 @@ export function AutoTradeControls() {
             </div>
           </div>
 
-          <div className="mt-2 flex items-center gap-4 text-xs text-muted-foreground">
+          <div className="mt-2 flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
             <span>Stop Loss: {formatMoney(autoTrade.stopLoss, currency, fxRate)}</span>
             <span>Take Profit: {formatMoney(autoTrade.takeProfit, currency, fxRate)}</span>
+            <span>Stake: {formatMoney(autoTrade.stake, currency, fxRate)}</span>
           </div>
         </Card>
       ) : (
-        // Setup state
         <div className="space-y-4">
-          {/* Direction */}
-          <div className="grid grid-cols-2 gap-2">
-            {dirs.map((d) => {
-              const active = d.id === direction;
-              return (
-                <button
-                  key={d.id}
-                  onClick={() => setDirection(d.id as Direction)}
-                  className={`flex items-center justify-center gap-2 rounded-lg border-2 p-3 font-semibold transition ${
-                    active
-                      ? d.id === "rise"
-                        ? "border-primary bg-primary/10 text-primary"
-                        : "border-destructive bg-destructive/10 text-destructive"
-                      : "border-border text-muted-foreground hover:border-primary/50"
-                  }`}
-                >
-                  <d.icon className={`h-4 w-4 ${active ? d.color : ""}`} />
-                  {d.label}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Contract type */}
+          {/* Contract Type */}
           <div>
             <Label className="text-xs text-muted-foreground">Contract Type</Label>
             <div className="mt-1 flex flex-wrap gap-1">
-              {CONTRACTS.map((c) => (
+              {contractOptions.map((c) => (
                 <button
                   key={c.id}
-                  onClick={() => setContract(c.id as ContractType)}
+                  onClick={() => handleContractChange(c.id as ContractType)}
                   className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
                     c.id === contract
                       ? "bg-primary text-primary-foreground"
@@ -162,61 +264,190 @@ export function AutoTradeControls() {
             </div>
           </div>
 
+          {/* Direction */}
+          <div>
+            <Label className="text-xs text-muted-foreground">Direction</Label>
+            <div className="mt-1 grid grid-cols-2 gap-2">
+              {dirs.map((d) => {
+                const active = d.id === direction;
+                const isNeg = NEGATIVE_DIRECTIONS.includes(d.id as Direction);
+                return (
+                  <button
+                    key={d.id}
+                    onClick={() => setDirection(d.id as Direction)}
+                    className={`flex items-center justify-center gap-2 rounded-lg border-2 p-3 font-semibold transition ${
+                      active
+                        ? isNeg
+                          ? "border-destructive bg-destructive/10 text-destructive"
+                          : "border-primary bg-primary/10 text-primary"
+                        : "border-border text-muted-foreground hover:border-primary/50"
+                    }`}
+                  >
+                    <d.icon className={`h-4 w-4 ${active ? d.color : ""}`} />
+                    {d.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Barrier/Digit selector */}
+          {showBarrier && (
+            <div>
+              <Label className="text-xs text-muted-foreground">
+                {contract === "over_under" ? "Last digit barrier" : "Digit to match/differ"}
+              </Label>
+              <div className="mt-1 grid grid-cols-5 gap-1">
+                {DIGIT_OPTIONS.map((digit) => (
+                  <button
+                    key={digit}
+                    onClick={() => setBarrier(digit)}
+                    className={`rounded-md py-2 text-sm font-bold transition ${
+                      barrier === digit
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-elevated text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {digit}
+                  </button>
+                ))}
+              </div>
+              <div className="mt-1 text-[10px] text-muted-foreground text-center">
+                {contract === "over_under" 
+                  ? "Price ends above or below this digit" 
+                  : "Price ends matching or differing from this digit"}
+              </div>
+            </div>
+          )}
+
+          {/* Duration */}
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <Clock className="h-4 w-4 text-muted-foreground" />
+              <Label className="text-xs text-muted-foreground">Duration</Label>
+            </div>
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <select
+                  value={durationUnit}
+                  onChange={(e) => {
+                    const unit = e.target.value as DurationUnit;
+                    setDurationUnit(unit);
+                    const max = UNIT_MAX[unit];
+                    const min = UNIT_MIN[unit];
+                    setDurationVal(Math.min(max, Math.max(min, durationVal)));
+                  }}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  {allowedUnits.map((unit) => (
+                    <option key={unit} value={unit}>
+                      {UNIT_LABELS[unit]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex-1 flex items-center gap-1">
+                <Input
+                  type="number"
+                  value={durationVal}
+                  min={UNIT_MIN[durationUnit]}
+                  max={UNIT_MAX[durationUnit]}
+                  onChange={(e) => {
+                    const n = Number(e.target.value);
+                    if (Number.isFinite(n)) {
+                      setDurationVal(Math.min(UNIT_MAX[durationUnit], Math.max(UNIT_MIN[durationUnit], n)));
+                    }
+                  }}
+                  className="w-full text-center"
+                />
+              </div>
+            </div>
+            <div className="mt-1 text-[10px] text-muted-foreground text-center">
+              {durationUnit === "ticks" 
+                ? `${durationVal} ticks = ${durationVal} seconds`
+                : `${UNIT_MIN[durationUnit]} – ${UNIT_MAX[durationUnit]} ${durationUnit}`}
+            </div>
+          </div>
+
           {/* Stake */}
           <div>
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between mb-1">
               <Label className="text-xs text-muted-foreground">Stake per trade</Label>
-              <span className="text-xs font-medium">{formatMoney(stake, currency, fxRate)}</span>
+              <span className="text-sm font-medium">{formatMoney(stake, currency, fxRate)}</span>
             </div>
-            <Input
-              type="range"
-              min={1}
-              max={Math.min(50, balance / 2)}
-              step={0.5}
-              value={stake}
-              onChange={(e) => setStake(parseFloat(e.target.value))}
-              className="mt-1"
-            />
-            <div className="flex justify-between text-[10px] text-muted-foreground">
-              <span>$1</span>
-              <span>Max: ${Math.min(50, Math.floor(balance / 2))}</span>
+            <div className="flex gap-2">
+              <Input
+                type="number"
+                min={1}
+                max={Math.min(50, balance / 2)}
+                step={0.5}
+                value={stake}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n)) setStake(Math.max(1, n));
+                }}
+                className="flex-1"
+              />
+            </div>
+            <div className="mt-1 flex flex-wrap gap-1">
+              {STAKE_PRESETS.map((p) => (
+                <button
+                  key={p}
+                  onClick={() => setStake(p)}
+                  className={`rounded px-2 py-0.5 text-xs ${
+                    stake === p ? "bg-primary text-primary-foreground" : "bg-elevated text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  ${p}
+                </button>
+              ))}
+              <button
+                onClick={() => setStake(Math.min(balance / 2, 50))}
+                className="rounded px-2 py-0.5 text-xs bg-elevated text-muted-foreground hover:text-foreground"
+              >
+                Max
+              </button>
             </div>
           </div>
 
           {/* Stop Loss & Take Profit */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between mb-1">
                 <Label className="text-xs text-muted-foreground">Stop Loss</Label>
                 <span className="text-xs font-medium text-destructive">
                   {formatMoney(stopLoss, currency, fxRate)}
                 </span>
               </div>
               <Input
-                type="range"
+                type="number"
                 min={stake + 1}
                 max={100}
                 step={1}
                 value={stopLoss}
-                onChange={(e) => setStopLoss(parseFloat(e.target.value))}
-                className="mt-1"
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n)) setStopLoss(Math.max(stake + 1, n));
+                }}
               />
             </div>
             <div>
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between mb-1">
                 <Label className="text-xs text-muted-foreground">Take Profit</Label>
                 <span className="text-xs font-medium text-primary">
                   {formatMoney(takeProfit, currency, fxRate)}
                 </span>
               </div>
               <Input
-                type="range"
+                type="number"
                 min={stake + 1}
                 max={100}
                 step={1}
                 value={takeProfit}
-                onChange={(e) => setTakeProfit(parseFloat(e.target.value))}
-                className="mt-1"
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n)) setTakeProfit(Math.max(stake + 1, n));
+                }}
               />
             </div>
           </div>
@@ -232,7 +463,7 @@ export function AutoTradeControls() {
 
           {/* Balance info */}
           <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>Available balance: {formatMoney(balance, currency, fxRate)}</span>
+            <span>Available: {formatMoney(balance, currency, fxRate)}</span>
             <span>Min stake: {formatMoney(1, currency, fxRate)}</span>
           </div>
 
