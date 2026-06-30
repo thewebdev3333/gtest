@@ -206,6 +206,27 @@ export async function depositMpesa(
   })
 }
 
+// api.ts - add this after the other wallet endpoints
+
+export interface PendingTransactionStatus {
+  id: string
+  status: 'pending' | 'completed' | 'failed'
+  amount_usd: string
+  amount_kes: string
+}
+
+export interface PendingTransactionResponse {
+  success: true
+  data: {
+    transactions: PendingTransactionStatus[]
+    hasPending: boolean
+  }
+}
+
+export async function checkPendingTransactions(): Promise<PendingTransactionResponse> {
+  return apiFetch<PendingTransactionResponse>('/wallet/pending/check')
+}
+
 export interface WithdrawResponse {
   success: true
   data: {

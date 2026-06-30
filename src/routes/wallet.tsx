@@ -1,12 +1,19 @@
 // wallet.tsx
 import { createFileRoute } from "@tanstack/react-router";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useApp, formatMoney } from "@/lib/store";
 import { DepositModal } from "@/components/trade/DepositModal";
-import { getTransactions, getWithdrawals, type Transaction, type WithdrawalRequest } from "@/lib/api";
+import { 
+  getTransactions, 
+  getWithdrawals, 
+  checkPendingTransactions,
+  type Transaction, 
+  type WithdrawalRequest,
+  type PendingTransactionStatus
+} from "@/lib/api";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 
@@ -21,6 +28,8 @@ function WalletPage() {
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
+  const [hasPending, setHasPending] = useState(false);
+  const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   
   const demoBalance = useApp((s) => s.demoBalance);
   const realBalance = useApp((s) => s.realBalance);
@@ -29,12 +38,16 @@ function WalletPage() {
   const isAuthenticated = useApp((s) => s.isAuthenticated);
   const fetchBalances = useApp((s) => s.fetchBalances);
 
-  // Define loadTransactions with useCallback to avoid stale closure
   const loadTransactions = useCallback(async () => {
     try {
+      console.log('[Wallet] Loading transactions...');
       const response = await getTransactions(page, 20);
       if (response.success) {
         setTransactions(response.data.transactions);
+        // Check if there are any pending transactions
+        const hasPendingTx = response.data.transactions.some(tx => tx.status === 'pending');
+        setHasPending(hasPendingTx);
+        console.log('[Wallet] Has pending transactions:', hasPendingTx);
       }
     } catch (err) {
       console.error('Failed to load transactions:', err);
@@ -67,52 +80,104 @@ function WalletPage() {
     }
   }, [fetchBalances, loadTransactions, loadWithdrawals]);
 
+  // Poll for pending transaction status
+  const pollPendingTransactions = useCallback(async () => {
+    if (!isAuthenticated || !hasPending) {
+      return;
+    }
+
+    try {
+      console.log('[Wallet] Polling for pending transactions...');
+      const response = await checkPendingTransactions();
+      
+      if (response.success && response.data.transactions.length > 0) {
+        // Update the transactions in the list
+        setTransactions(prev => 
+          prev.map(tx => {
+            const updated = response.data.transactions.find((t: PendingTransactionStatus) => t.id === tx.id);
+            if (updated && updated.status !== tx.status) {
+              console.log(`[Wallet] Transaction ${tx.id} status changed: ${tx.status} -> ${updated.status}`);
+              
+              // Show toast notification
+              if (updated.status === 'completed') {
+                if (tx.type === 'deposit') {
+                  toast.success(`Deposit of $${parseFloat(tx.amount_usd).toFixed(2)} completed!`);
+                } else if (tx.type === 'withdrawal') {
+                  toast.success(`Withdrawal of $${parseFloat(tx.amount_usd).toFixed(2)} completed!`);
+                }
+              } else if (updated.status === 'failed') {
+                if (tx.type === 'deposit') {
+                  toast.error('Deposit failed. Please try again.');
+                } else if (tx.type === 'withdrawal') {
+                  toast.error('Withdrawal failed. Please contact support.');
+                }
+              }
+              
+              return { ...tx, status: updated.status };
+            }
+            return tx;
+          })
+        );
+        
+        // Refresh balances if any transaction was updated
+        if (response.data.transactions.some((t: PendingTransactionStatus) => t.status !== 'pending')) {
+          fetchBalances();
+        }
+        
+        // Check if there are still pending transactions
+        const stillPending = transactions.some(tx => tx.status === 'pending');
+        setHasPending(stillPending);
+        
+        // If no more pending, stop polling
+        if (!stillPending && pollingIntervalRef.current) {
+          console.log('[Wallet] No pending transactions, stopping polling');
+          clearInterval(pollingIntervalRef.current);
+          pollingIntervalRef.current = null;
+        }
+      }
+    } catch (err) {
+      console.error('[Wallet] Failed to poll pending transactions:', err);
+    }
+  }, [isAuthenticated, hasPending, transactions, fetchBalances]);
+
+  // Start/stop polling based on pending transactions
+  useEffect(() => {
+    if (!isAuthenticated) {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
+      }
+      return;
+    }
+
+    if (hasPending) {
+      console.log('[Wallet] Starting polling for pending transactions');
+      // Poll immediately
+      pollPendingTransactions();
+      // Then poll every 3 seconds
+      pollingIntervalRef.current = setInterval(pollPendingTransactions, 3000);
+    } else {
+      if (pollingIntervalRef.current) {
+        console.log('[Wallet] No pending transactions, stopping polling');
+        clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
+      }
+    }
+
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
+      }
+    };
+  }, [isAuthenticated, hasPending, pollPendingTransactions]);
+
   // Initial load
   useEffect(() => {
     if (isAuthenticated) {
       loadData();
     }
   }, [isAuthenticated, loadData]);
-
-  // Subscribe to WebSocket transaction updates
-  useEffect(() => {
-    if (!isAuthenticated) return;
-
-    const ws = useApp.getState().ws;
-    if (!ws) {
-      console.log('[Wallet] No WebSocket connection available');
-      return;
-    }
-
-    const handler = (data: any) => {
-      console.log('[Wallet] Transaction update received:', data);
-      
-      // ✅ FIX: Patch the specific row immediately from WS data
-      setTransactions(prev =>
-        prev.map(tx =>
-          tx.id === data.transactionId
-            ? { ...tx, status: data.status }
-            : tx
-        )
-      );
-
-      // Then re-fetch to get a fresh authoritative list
-      if (data.status === 'completed' || data.status === 'failed') {
-        console.log('[Wallet] Reloading transactions due to status:', data.status);
-        loadTransactions();
-        // Also refresh balances to be safe
-        fetchBalances();
-      }
-    };
-
-    ws.on('transaction_updated', handler);
-    console.log('[Wallet] Subscribed to transaction_updated events');
-
-    return () => {
-      ws.off('transaction_updated', handler);
-      console.log('[Wallet] Unsubscribed from transaction_updated events');
-    };
-  }, [isAuthenticated, loadTransactions, fetchBalances]);
 
   const getTransactionStatusColor = (status: string) => {
     switch (status) {
@@ -167,7 +232,18 @@ function WalletPage() {
         </div>
 
         <Card className="p-5">
-          <h2 className="mb-3 font-semibold">Recent Transactions</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold">Recent Transactions</h2>
+            {hasPending && (
+              <div className="flex items-center gap-2 text-xs text-yellow-500">
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-yellow-500 opacity-75" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-yellow-500" />
+                </span>
+                Checking for updates...
+              </div>
+            )}
+          </div>
           {loading ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -192,6 +268,9 @@ function WalletPage() {
                     </div>
                     <div className={`text-xs ${getTransactionStatusColor(tx.status)}`}>
                       {tx.status}
+                      {tx.status === 'pending' && (
+                        <span className="ml-1 inline-block h-2 w-2 animate-pulse rounded-full bg-yellow-500" />
+                      )}
                     </div>
                   </div>
                 </div>
