@@ -411,12 +411,23 @@ function Tile({ k, v }: { k: string; v: string }) {
 }
 
 function FooterCol({ title, items }: { title: string; items: string[] }) {
+  const pathMap: Record<string, string> = {
+    "Terms": "/terms",
+    "Privacy": "/privacy",
+    "Risk disclosure": "/risk",
+    "Cookies": "/cookies",
+  };
+  
   return (
     <div>
       <div className="text-sm font-semibold">{title}</div>
       <ul className="mt-3 space-y-2 text-sm text-muted-foreground">
         {items.map((i) => (
-          <li key={i}><a className="hover:text-foreground" href="#">{i}</a></li>
+          <li key={i}>
+            <Link to={pathMap[i] || "#"} className="hover:text-foreground">
+              {i}
+            </Link>
+          </li>
         ))}
       </ul>
     </div>
