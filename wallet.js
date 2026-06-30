@@ -295,7 +295,6 @@ async function depositMpesa(req, res, next) {
     }
 
     // Store the checkoutRequestId in the reference field (keep our reference too)
-    // We'll store it as a separate update
     await db.updateTransactionStatus(tx.id, 'pending', checkoutRequestId)
 
     if (req.idempotencyKey && req.idempotencyStore) {
@@ -330,7 +329,7 @@ async function depositMpesa(req, res, next) {
   }
 }
 
-// ── NEW: Check pending transaction status ─────────────────────────
+// ── Check pending transactions (polling endpoint) ─────────────────
 
 async function checkPendingTransactions(req, res, next) {
   try {
@@ -339,7 +338,7 @@ async function checkPendingTransactions(req, res, next) {
     // Get all pending deposit transactions
     const { data: pendingTxs, error } = await db.supabase
       .from('transactions')
-      .select('id, reference, amount_usd, amount_kes, created_at')
+      .select('id, reference, amount_usd, amount_kes, created_at, status')
       .eq('user_id', userId)
       .eq('type', 'deposit')
       .eq('status', 'pending')
@@ -347,14 +346,19 @@ async function checkPendingTransactions(req, res, next) {
 
     if (error) throw error
 
+    // If no pending transactions, return empty array
     if (!pendingTxs || pendingTxs.length === 0) {
       return res.json({ 
         success: true, 
-        data: { transactions: [] } 
+        data: { 
+          transactions: [],
+          hasPending: false 
+        } 
       })
     }
 
     const updatedTransactions = []
+    let hasPending = false
 
     for (const tx of pendingTxs) {
       // Check if the transaction is older than 5 minutes
@@ -407,11 +411,46 @@ async function checkPendingTransactions(req, res, next) {
                 amount_kes: tx.amount_kes,
               })
               console.log(`[Polling] Transaction ${tx.id} marked as failed`)
+            } else {
+              // Still pending - add to response so frontend knows
+              hasPending = true
+              updatedTransactions.push({
+                id: tx.id,
+                status: 'pending',
+                amount_usd: tx.amount_usd,
+                amount_kes: tx.amount_kes,
+              })
             }
+          } else {
+            // Couldn't check status - assume still pending
+            hasPending = true
+            updatedTransactions.push({
+              id: tx.id,
+              status: 'pending',
+              amount_usd: tx.amount_usd,
+              amount_kes: tx.amount_kes,
+            })
           }
         } catch (err) {
           console.error(`[Polling] Failed to check transaction ${tx.id}:`, err.message)
+          // Keep as pending
+          hasPending = true
+          updatedTransactions.push({
+            id: tx.id,
+            status: 'pending',
+            amount_usd: tx.amount_usd,
+            amount_kes: tx.amount_kes,
+          })
         }
+      } else {
+        // No reference - keep as pending
+        hasPending = true
+        updatedTransactions.push({
+          id: tx.id,
+          status: 'pending',
+          amount_usd: tx.amount_usd,
+          amount_kes: tx.amount_kes,
+        })
       }
     }
 
@@ -419,7 +458,7 @@ async function checkPendingTransactions(req, res, next) {
       success: true, 
       data: { 
         transactions: updatedTransactions,
-        hasPending: pendingTxs.length > 0
+        hasPending: hasPending || updatedTransactions.some(t => t.status === 'pending')
       } 
     })
   } catch (err) {
@@ -428,7 +467,7 @@ async function checkPendingTransactions(req, res, next) {
   }
 }
 
-// ── Webhook Callback (simplified - just updates DB, no broadcast) ──
+// ── Webhook Callback (just updates DB, no broadcast) ─────────────
 
 async function palplussCallback(req, res, next) {
   try {
@@ -784,14 +823,6 @@ async function getKycStatusHandler(req, res, next) {
   } catch (err) { next(err) }
 }
 
-
-// Alias for backward compatibility
-const checkTransactionStatus = checkPalPlussTransactionStatus;
-
-function setWebSocketServer(wss) {
-  // No-op - WebSocket broadcasting is no longer used
-  console.log('[Wallet] WebSocket broadcasting disabled (using polling instead)')
-}
 // ── Exports ──────────────────────────────────────────────────────
 
 module.exports = {
@@ -807,10 +838,8 @@ module.exports = {
   getKycStatus,
   kycUpload,
   initiateStkPush,
-  checkTransactionStatus,        // ✅ Added
   checkPalPlussTransactionStatus,
   completeTransactionManually,
   checkPendingTransactions,
   formatPhoneNumber,
-  setWebSocketServer, 
 }

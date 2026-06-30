@@ -343,7 +343,7 @@ wss.on('connection', (ws, req) => {
 })
 
 // Set WebSocket server reference in wallet module for broadcasting
-wallet.setWebSocketServer(wss)
+// wallet.setWebSocketServer(wss)
 
 // ── Boot sequence ──────────────────────────────────────────────────
 
