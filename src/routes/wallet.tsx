@@ -9,13 +9,11 @@ import { DepositModal } from "@/components/trade/DepositModal";
 import { 
   getTransactions, 
   getWithdrawals, 
-  checkPendingTransactions,
   type Transaction, 
-  type WithdrawalRequest,
-  type PendingTransactionStatus
+  type WithdrawalRequest
 } from "@/lib/api";
 import { toast } from "sonner";
-import { Loader2 } from "lucide-react";
+import { Loader2, RefreshCw } from "lucide-react";
 
 export const Route = createFileRoute("/wallet")({
   head: () => ({ meta: [{ title: "G Wave — Wallet" }] }),
@@ -39,15 +37,14 @@ function WalletPage() {
   const isAuthenticated = useApp((s) => s.isAuthenticated);
   const fetchBalances = useApp((s) => s.fetchBalances);
 
+  // ✅ This is the only function we need - it fetches fresh data from the database
   const loadTransactions = useCallback(async () => {
     try {
       console.log('[Wallet] Loading transactions...');
       const response = await getTransactions(page, 20);
       if (response.success) {
         setTransactions(response.data.transactions);
-        // Check if there are any pending transactions
         const hasPendingTx = response.data.transactions.some(tx => tx.status === 'pending');
-        console.log('[Wallet] Has pending transactions:', hasPendingTx);
         
         // Start or stop polling based on pending status
         if (hasPendingTx && !isPollingRef.current) {
@@ -87,25 +84,24 @@ function WalletPage() {
     }
   }, [fetchBalances, loadTransactions, loadWithdrawals]);
 
-  // Start polling for pending transactions
+  // ✅ Simple polling - just calls loadTransactions() every 3 seconds
   const startPolling = useCallback(() => {
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current);
       pollingIntervalRef.current = null;
     }
     
-    console.log('[Wallet] Starting polling for pending transactions');
+    console.log('[Wallet] Starting polling (every 3s)');
     isPollingRef.current = true;
     setIsPolling(true);
     
-    // Poll immediately
-    pollPendingTransactions();
-    
-    // Then poll every 3 seconds
-    pollingIntervalRef.current = setInterval(pollPendingTransactions, 3000);
-  }, []);
+    pollingIntervalRef.current = setInterval(() => {
+      // ✅ Just refresh the transactions from the database
+      loadTransactions();
+      fetchBalances();
+    }, 3000);
+  }, [loadTransactions, fetchBalances]);
 
-  // Stop polling
   const stopPolling = useCallback(() => {
     if (pollingIntervalRef.current) {
       console.log('[Wallet] Stopping polling');
@@ -116,76 +112,11 @@ function WalletPage() {
     setIsPolling(false);
   }, []);
 
-  // Poll for pending transaction status
-  const pollPendingTransactions = useCallback(async () => {
-    if (!isAuthenticated) {
-      stopPolling();
-      return;
-    }
-
-    try {
-      console.log('[Wallet] Polling for pending transactions...');
-      const response = await checkPendingTransactions();
-      
-      if (response.success && response.data.transactions.length > 0) {
-        let hasUpdates = false;
-        let stillPending = false;
-        
-        // Update the transactions in the list
-        setTransactions(prev => {
-          const updated = prev.map(tx => {
-            const found = response.data.transactions.find((t: PendingTransactionStatus) => t.id === tx.id);
-            if (found && found.status !== tx.status) {
-              hasUpdates = true;
-              console.log(`[Wallet] Transaction ${tx.id} status changed: ${tx.status} -> ${found.status}`);
-              
-              // Show toast notification
-              if (found.status === 'completed') {
-                if (tx.type === 'deposit') {
-                  toast.success(`Deposit of $${parseFloat(tx.amount_usd).toFixed(2)} completed!`);
-                } else if (tx.type === 'withdrawal') {
-                  toast.success(`Withdrawal of $${parseFloat(tx.amount_usd).toFixed(2)} completed!`);
-                }
-              } else if (found.status === 'failed') {
-                if (tx.type === 'deposit') {
-                  toast.error('Deposit failed. Please try again.');
-                } else if (tx.type === 'withdrawal') {
-                  toast.error('Withdrawal failed. Please contact support.');
-                }
-              }
-              
-              return { ...tx, status: found.status };
-            }
-            return tx;
-          });
-          
-          // Check if there are still pending transactions
-          stillPending = updated.some(tx => tx.status === 'pending');
-          
-          return updated;
-        });
-        
-        // Refresh balances if any transaction was updated
-        if (hasUpdates) {
-          fetchBalances();
-        }
-        
-        // Stop polling if no more pending transactions
-        if (!stillPending && isPollingRef.current) {
-          stopPolling();
-        }
-      } else {
-        // No pending transactions found in the response
-        // Check if we still have any pending in our local state
-        const stillPending = transactions.some(tx => tx.status === 'pending');
-        if (!stillPending && isPollingRef.current) {
-          stopPolling();
-        }
-      }
-    } catch (err) {
-      console.error('[Wallet] Failed to poll pending transactions:', err);
-    }
-  }, [isAuthenticated, transactions, fetchBalances, stopPolling]);
+  // ✅ Manual refresh button
+  const handleRefresh = useCallback(() => {
+    loadData();
+    toast.info('Refreshing...');
+  }, [loadData]);
 
   // Clean up polling on unmount
   useEffect(() => {
@@ -203,25 +134,11 @@ function WalletPage() {
     if (isAuthenticated) {
       loadData();
     } else {
-      // Stop polling if not authenticated
       if (isPollingRef.current) {
         stopPolling();
       }
     }
   }, [isAuthenticated, loadData, stopPolling]);
-
-  // Also check for pending transactions when the component mounts or when we return to the page
-  useEffect(() => {
-    if (isAuthenticated) {
-      // Check if there are pending transactions and start polling if needed
-      const hasPendingTx = transactions.some(tx => tx.status === 'pending');
-      if (hasPendingTx && !isPollingRef.current) {
-        startPolling();
-      } else if (!hasPendingTx && isPollingRef.current) {
-        stopPolling();
-      }
-    }
-  }, [transactions, isAuthenticated, startPolling, stopPolling]);
 
   const getTransactionStatusColor = (status: string) => {
     switch (status) {
@@ -246,7 +163,18 @@ function WalletPage() {
   return (
     <AppShell>
       <div className="mx-auto max-w-4xl space-y-6 p-4 md:p-8">
-        <h1 className="text-2xl font-bold">Wallet</h1>
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold">Wallet</h1>
+          <Button 
+            variant="outline" 
+            size="sm" 
+            onClick={handleRefresh}
+            disabled={loading}
+          >
+            <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>
+        </div>
         
         <div className="grid gap-4 sm:grid-cols-2">
           <Card className="p-5">
@@ -278,15 +206,17 @@ function WalletPage() {
         <Card className="p-5">
           <div className="flex items-center justify-between mb-3">
             <h2 className="font-semibold">Recent Transactions</h2>
-            {isPolling && (
-              <div className="flex items-center gap-2 text-xs text-yellow-500">
-                <span className="relative flex h-2 w-2">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-yellow-500 opacity-75" />
-                  <span className="relative inline-flex h-2 w-2 rounded-full bg-yellow-500" />
-                </span>
-                Checking for updates...
-              </div>
-            )}
+            <div className="flex items-center gap-3">
+              {isPolling && (
+                <div className="flex items-center gap-2 text-xs text-yellow-500">
+                  <span className="relative flex h-2 w-2">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-yellow-500 opacity-75" />
+                    <span className="relative inline-flex h-2 w-2 rounded-full bg-yellow-500" />
+                  </span>
+                  Auto-refresh
+                </div>
+              )}
+            </div>
           </div>
           {loading ? (
             <div className="flex items-center justify-center py-8">
