@@ -158,7 +158,7 @@ interface AppState {
   // Auto Trade
   autoTrade: AutoTradeConfig;
   startAutoTrade: (config: Partial<AutoTradeConfig>) => void;
-  stopAutoTrade: () => void;
+  stopAutoTrade: (skipModal?: boolean) => void;
   placeAutoTrade: () => Promise<void>;
   handleAutoTradeSettlement: (trade: Trade) => void;
   
@@ -492,27 +492,28 @@ export const useApp = create<AppState>((set, get) => {
       }, 500);
     },
 
-    stopAutoTrade: () => {
+    stopAutoTrade: (skipModal = false) => {
       const current = get().autoTrade;
       if (!current.isRunning) return;
       
       const stoppedAt = Date.now();
-      const duration = current.startedAt ? Math.round((stoppedAt - current.startedAt) / 1000 / 60) : 0;
       
-      // Show result modal for manual stop
-      get().showAutoTradeResult({
-        reason: 'manual_stop',
-        totalPnl: current.totalPnl,
-        tradesCount: current.tradesCount,
-        wins: current.wins,
-        losses: current.losses,
-        startedAt: current.startedAt,
-        stoppedAt: stoppedAt,
-        direction: current.direction,
-        contract: current.contract,
-        stopLoss: current.stopLoss,
-        takeProfit: current.takeProfit,
-      });
+      // ✅ Only show modal if skipModal is false (manual stop from UI)
+      if (!skipModal) {
+        get().showAutoTradeResult({
+          reason: 'manual_stop',
+          totalPnl: current.totalPnl,
+          tradesCount: current.tradesCount,
+          wins: current.wins,
+          losses: current.losses,
+          startedAt: current.startedAt,
+          stoppedAt: stoppedAt,
+          direction: current.direction,
+          contract: current.contract,
+          stopLoss: current.stopLoss,
+          takeProfit: current.takeProfit,
+        });
+      }
       
       set({
         autoTrade: {
@@ -523,7 +524,7 @@ export const useApp = create<AppState>((set, get) => {
       });
       
       const state = get();
-      toast.info(`Auto Trading stopped after ${duration} minute${duration !== 1 ? 's' : ''}`, {
+      toast.info(`Auto Trading stopped`, {
         description: `Trades: ${current.tradesCount} · P&L: ${formatMoney(current.totalPnl, state.currency, state.fxRate)}`
       });
     },
@@ -553,7 +554,7 @@ export const useApp = create<AppState>((set, get) => {
           stopLoss: autoTrade.stopLoss,
           takeProfit: autoTrade.takeProfit,
         });
-        state.stopAutoTrade();
+        state.stopAutoTrade(true);
         return;
       }
       
@@ -573,7 +574,7 @@ export const useApp = create<AppState>((set, get) => {
           stopLoss: autoTrade.stopLoss,
           takeProfit: autoTrade.takeProfit,
         });
-        state.stopAutoTrade();
+        state.stopAutoTrade(true);
         return;
       }
       
@@ -593,7 +594,7 @@ export const useApp = create<AppState>((set, get) => {
           stopLoss: autoTrade.stopLoss,
           takeProfit: autoTrade.takeProfit,
         });
-        state.stopAutoTrade();
+        state.stopAutoTrade(true);
         return;
       }
       
@@ -615,7 +616,7 @@ export const useApp = create<AppState>((set, get) => {
           stopLoss: autoTrade.stopLoss,
           takeProfit: autoTrade.takeProfit,
         });
-        state.stopAutoTrade();
+        state.stopAutoTrade(true);
         return;
       }
       
@@ -667,7 +668,7 @@ export const useApp = create<AppState>((set, get) => {
           stopLoss: autoTrade.stopLoss,
           takeProfit: autoTrade.takeProfit,
         });
-        state.stopAutoTrade();
+        state.stopAutoTrade(true);
       }
     },
 
@@ -710,7 +711,7 @@ export const useApp = create<AppState>((set, get) => {
           stopLoss: autoTrade.stopLoss,
           takeProfit: autoTrade.takeProfit,
         });
-        state.stopAutoTrade();
+        state.stopAutoTrade(true);
         return;
       }
       
@@ -730,7 +731,7 @@ export const useApp = create<AppState>((set, get) => {
           stopLoss: autoTrade.stopLoss,
           takeProfit: autoTrade.takeProfit,
         });
-        state.stopAutoTrade();
+        state.stopAutoTrade(true);
         return;
       }
       
