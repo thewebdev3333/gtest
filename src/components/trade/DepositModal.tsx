@@ -36,8 +36,8 @@ export function DepositModal({
       cleanPhone = cleanPhone.substring(1)
     }
 
-    if (!/^2547\d{8}$/.test(cleanPhone)) {
-      toast.error("Enter a valid Kenyan phone number (e.g., 0712345678)");
+    if (!/^254[17]\d{8}$/.test(cleanPhone)) {
+      toast.error("Enter a valid Kenyan phone number (e.g., 0712345678 or 0112345678)");
       return;
     }
 
