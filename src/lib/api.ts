@@ -73,7 +73,6 @@ export async function apiFetch<T>(
       removeToken()
       window.location.href = '/login'
     }
-    // ✅ CHANGED: throw ApiError with status + code instead of a plain Error
     throw new ApiError(data.error || data.message || 'API request failed', response.status, data.code)
   }
 
@@ -253,7 +252,6 @@ export async function withdrawMpesa(
 
   return apiFetch<WithdrawResponse>('/wallet/withdraw/mpesa', {
     method: 'POST',
-    headers,
     body: JSON.stringify({ phone: formattedPhone, amountUSD }),
   })
 }
@@ -337,7 +335,6 @@ export interface PayoutPreviewResponse {
   data: { potentialPayout: number }
 }
 
-// ✅ FIX: Extended signature to pass direction/selectedDigit for edge-case multipliers
 export async function getPayoutPreview(
   contractType: string,
   stake: number,
@@ -430,6 +427,8 @@ export interface SettleTradeResponse {
     outcome: 'win' | 'loss'
     pnl: number
     newBalance: number
+    accountType: 'demo' | 'real'
+    alreadySettled?: boolean
   }
 }
 

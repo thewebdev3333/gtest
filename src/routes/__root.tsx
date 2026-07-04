@@ -15,6 +15,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { DemoBadge } from "@/components/layout/DemoBadge";
 import { useApp } from "@/lib/store";
 import { getToken } from "@/lib/api";
+import { useTickEngine } from "@/lib/tick-engine";
 
 function NotFoundComponent() {
   return (
@@ -95,6 +96,15 @@ function RootComponent() {
   const connectWebSocket = useApp((s) => s.connectWebSocket);
   const disconnectWebSocket = useApp((s) => s.disconnectWebSocket);
   const volatility = useApp((s) => s.volatility);
+
+  // ✅ FIX: this hook was defined but never called anywhere in the app.
+  // It runs the settlement watchdog (force-settles trades past their
+  // expiry via REST, independent of any WebSocket push) and the
+  // synthetic price fallback used when the WebSocket is disconnected.
+  // Without this call, trade closing depended entirely on a
+  // contract_settled WS push arriving — if that was ever missed, the
+  // trade stayed "open" in the UI indefinitely.
+  useTickEngine();
 
   useEffect(() => {
     const initApp = async () => {

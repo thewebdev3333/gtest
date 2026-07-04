@@ -51,12 +51,44 @@ export const CONTRACTS: { id: ContractType; label: string }[] = [
 
 export const NEGATIVE_DIRECTIONS: Direction[] = ["fall", "under", "differ", "odd"];
 
+// ⚠️ These MUST always be kept in sync with PAYOUT_MULTIPLIERS in the
+// backend's market.js. They are used ONLY to render an instant preview
+// while the user is configuring a trade — the authoritative payout is
+// always calculated server-side, in /trade/payout-preview and again in
+// /trade/place, and that server-side number is what's actually paid out.
 export const PAYOUT_MULTIPLIER: Record<ContractType, number> = {
-  rise_fall: 1.836,
-  over_under: 1.85,
-  match_differ: 1.236,
-  even_odd: 1.95,
+  rise_fall: 1.88,
+  over_under: 1.88,
+  match_differ: 8.00,
+  even_odd: 1.96,
 };
+
+// Mirrors OVER_UNDER_EDGE_MULTIPLIER in market.js.
+export const OVER_UNDER_EDGE_MULTIPLIER = 1.19;
+
+// Instant, network-free payout estimate for UI preview purposes only.
+export function estimatePayout(
+  contractType: ContractType,
+  stake: number,
+  direction?: Direction,
+  selectedDigit?: number,
+): number {
+  let multiplier = PAYOUT_MULTIPLIER[contractType] ?? 1.88;
+
+  if (
+    contractType === "over_under" &&
+    direction &&
+    selectedDigit !== undefined &&
+    selectedDigit !== null
+  ) {
+    const isEdge =
+      (selectedDigit === 0 && direction === "over") ||
+      (selectedDigit === 9 && direction === "under");
+    if (isEdge) multiplier = OVER_UNDER_EDGE_MULTIPLIER;
+  }
+
+  return parseFloat((stake * multiplier).toFixed(8));
+}
 
 export interface Trade {
   id: string;
@@ -137,7 +169,7 @@ interface AppState {
   resetPrice: (p: number) => void;
   trades: Trade[];
   setTrades: (trades: Trade[]) => void;
-  openTrade: (t: Omit<Trade, "id" | "status" | "entryAt" | "expiresAt"> & { entryAt?: number }) => Trade;
+  openTrade: (t: Omit<Trade, "id" | "status" | "entryAt" | "expiresAt"> & { entryAt?: number }, realId?: string) => Trade;
   settleTrade: (id: string, exitPrice: number) => Promise<Trade | undefined>;
   crosshairEnabled: boolean;
   toggleCrosshair: () => void;
@@ -238,7 +270,7 @@ const initialAutoTradeResult = {
   result: null,
 };
 
-// ✅ NEW: module-level guard to prevent double-settlement for auto-trade contracts
+// module-level guard to prevent double-settlement for auto-trade contracts
 const autoSettledContractIds = new Set<string>();
 
 export const useApp = create<AppState>((set, get) => {
@@ -354,9 +386,14 @@ export const useApp = create<AppState>((set, get) => {
         const response = await settleTrade(id, exitPrice, accountType);
 
         if (response.success) {
-          const { outcome, pnl, newBalance } = response.data;
+          const { outcome, pnl, newBalance, accountType: creditedAccountType } = response.data;
           const won = outcome === 'win';
-          const balKey = get().account === "demo" ? "demoBalance" : "realBalance";
+          // ✅ FIX: use the account type the BACKEND says it credited
+          // (derived server-side from contract.account_id), not whatever
+          // account the user currently has selected in the UI. Prevents
+          // updating the wrong local balance if the user switched
+          // demo/real tabs while this trade was still open.
+          const balKey = creditedAccountType === "demo" ? "demoBalance" : "realBalance";
 
           const updatedTrade: Trade = { ...t, status: won ? "won" : "lost", exitPrice, pnl };
 
@@ -366,7 +403,7 @@ export const useApp = create<AppState>((set, get) => {
           }) as Partial<AppState>);
           savePrefs(get());
 
-          // ✅ CHANGED: only the tracked auto-trade contract, and only once
+          // only the tracked auto-trade contract, and only once
           const autoTrade = get().autoTrade;
           if (
             autoTrade.isRunning &&
@@ -844,7 +881,6 @@ export const useApp = create<AppState>((set, get) => {
       }
     },
 
-    // ✅ FIXED: syncTrades now merges instead of replacing
     syncTrades: async () => {
       try {
         const accountType = get().account;
@@ -869,17 +905,7 @@ export const useApp = create<AppState>((set, get) => {
           const openIds = new Set(openTrades.map((t) => t.id));
 
           set((s) => {
-            // ✅ CHANGED: keep every local trade that's already settled
-            // (won/lost) — those carry real exitPrice/pnl from settleTrade or
-            // the WS handler and must not be discarded just because the
-            // "open positions" endpoint no longer lists them.
             const alreadySettledLocally = s.trades.filter((t) => t.status !== 'open');
-
-            // Any local trade still marked "open" that the backend no longer
-            // considers open, but that we never received a settlement event
-            // for (e.g. missed WS message): keep it as-is rather than silently
-            // dropping it. It'll get corrected next time an explicit settle
-            // or WS event for it arrives.
             const staleOpenNotYetReconciled = s.trades.filter(
               (t) => t.status === 'open' && !openIds.has(t.id)
             );
@@ -923,7 +949,6 @@ export const useApp = create<AppState>((set, get) => {
       wsInstance.on('contract_settled', (data) => {
         console.log('[WS] Contract settled:', data);
 
-        // ✅ Still sync, but now it merges instead of replacing
         get().syncTrades();
         get().fetchBalances();
 

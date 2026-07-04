@@ -4,6 +4,7 @@ import {
   useApp,
   NEGATIVE_DIRECTIONS,
   formatMoney,
+  estimatePayout,
   type ContractType,
   type Direction,
   type DurationUnit,
@@ -12,8 +13,6 @@ import { placeTrade, getPayoutPreview } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { Minus, Plus } from "lucide-react";
-
-// ❌ REMOVED hardcoded PAYOUT_MULTIPLIER — now fetched live from backend
 
 const UNIT_TO_MS: Record<DurationUnit, number> = {
   ticks: 1000,
@@ -85,7 +84,18 @@ export function TradeControls() {
 
   const isNegative = NEGATIVE_DIRECTIONS.includes(direction);
 
-  // ✅ NEW: fetch the live payout preview whenever relevant inputs change
+  // ✅ Instant client-side estimate — updates immediately, with no network
+  // round trip, using the same multipliers as the backend (kept in sync
+  // in store.ts). This is a preview only; the actual payout used for the
+  // trade is always calculated and enforced server-side in /trade/place.
+  useEffect(() => {
+    const digit = (contract === 'over_under' || contract === 'match_differ') ? barrier : undefined;
+    setPayout(estimatePayout(contract, stake, direction, digit));
+  }, [contract, stake, direction, barrier]);
+
+  // Debounced authoritative fetch — corrects the instant estimate above
+  // in the rare case the backend's live multipliers ever diverge from
+  // the client's copy.
   useEffect(() => {
     let cancelled = false;
     setPayoutLoading(true);
@@ -95,7 +105,7 @@ export function TradeControls() {
         const res = await getPayoutPreview(contract, stake, direction, digit);
         if (!cancelled && res.success) setPayout(res.data.potentialPayout);
       } catch {
-        // keep the last known payout on a transient error; don't blank the UI
+        // keep the last known (estimated) payout on a transient error
       } finally {
         if (!cancelled) setPayoutLoading(false);
       }
@@ -115,7 +125,8 @@ export function TradeControls() {
 
     try {
       const durationTicks = durationVal * (unit === 'ticks' ? 1 : unit === 'seconds' ? 1 : unit === 'minutes' ? 60 : 3600);
-      
+      const cappedDurationTicks = Math.min(durationTicks, 3600);
+
       const response = await placeTrade({
         accountType: account,
         symbol: volatility,
@@ -123,15 +134,37 @@ export function TradeControls() {
         direction,
         selectedDigit: contract === 'over_under' || contract === 'match_differ' ? barrier : undefined,
         stake,
-        durationTicks: Math.min(durationTicks, 3600),
+        durationTicks: cappedDurationTicks,
       });
 
       if (response.success) {
+        // ✅ Optimistic local insert using the data the backend already
+        // returned — the position now appears immediately instead of
+        // waiting on the full syncAll() round trip below. Pass the real
+        // contractId as the second argument so this trade's id matches
+        // the backend contract id (required for settlement/lookup to
+        // find it later).
+        openTrade(
+          {
+            contract,
+            direction,
+            volatility,
+            stake,
+            payout: response.data.potentialPayout,
+            durationMs: cappedDurationTicks * 1000,
+            entryPrice: response.data.entryPrice,
+            barrier: contract === 'over_under' || contract === 'match_differ' ? barrier : undefined,
+          },
+          response.data.contractId,
+        );
+
         toast.success(`Opened ${direction.toUpperCase()} for $${stake.toFixed(2)}`, {
           description: `Trade #${response.data.contractId.slice(0, 6)} · settles in ${durationVal} ${unit}`,
         });
-        
-        await syncAll();
+
+        // Background reconciliation only — the UI is already updated
+        // above, so this does not need to be awaited before returning.
+        syncAll();
       }
     } catch (err: any) {
       toast.error(err.message || "Failed to place trade");
@@ -292,11 +325,10 @@ export function TradeControls() {
         className={`w-full rounded-md py-3 font-bold text-white transition ${
           isNegative ? "bg-destructive hover:bg-destructive/90" : "bg-primary hover:bg-primary/90"
         }`}
-        disabled={payoutLoading}
       >
         <div>Buy</div>
         <div className="text-xs font-medium opacity-90">
-          Potential Payout: {payoutLoading ? "..." : formatMoney(payout, currency, fxRate)}
+          Potential Payout: {formatMoney(payout, currency, fxRate)}
         </div>
       </button>
     </div>
