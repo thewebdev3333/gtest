@@ -1,6 +1,6 @@
 // src/routes/cookies.tsx
-import { createFileRoute, Link } from "@tanstack/react-router";
-import { AppShell } from "@/components/layout/AppShell";
+import { createFileRoute } from "@tanstack/react-router";
+import { PublicLayout } from "@/components/layout/Publiclayout";
 import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Cookie, Shield, Settings, BarChart3 } from "lucide-react";
@@ -17,11 +17,11 @@ export const Route = createFileRoute("/cookies")({
 
 function CookiesPage() {
   return (
-    <AppShell>
-      <div className="mx-auto max-w-4xl space-y-6 p-4 md:p-8">
+    <PublicLayout>
+      <div className="space-y-6">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Cookie Policy</h1>
-          <p className="mt-2 text-sm text-muted-foreground">Last updated: June 30, 2026</p>
+          <p className="mt-2 text-sm text-muted-foreground">Last updated: July 2026</p>
         </div>
 
         <Card className="p-6 md:p-8 space-y-6">
@@ -197,13 +197,15 @@ function CookiesPage() {
         </Card>
 
         <div className="flex flex-wrap gap-4 text-sm text-muted-foreground">
-          <Link to="/terms" className="hover:text-foreground">Terms of Service</Link>
+          <a href="/terms" className="hover:text-foreground">Terms of Service</a>
           <span className="text-border">|</span>
-          <Link to="/privacy" className="hover:text-foreground">Privacy Policy</Link>
+          <a href="/privacy" className="hover:text-foreground">Privacy Policy</a>
           <span className="text-border">|</span>
-          <Link to="/risk" className="hover:text-foreground">Risk Disclosure</Link>
+          <a href="/risk" className="hover:text-foreground">Risk Disclosure</a>
+          <span className="text-border">|</span>
+          <a href="/cookies" className="hover:text-foreground">Cookie Policy</a>
         </div>
       </div>
-    </AppShell>
+    </PublicLayout>
   );
 }

@@ -226,7 +226,7 @@ function Landing() {
                   Get started <ArrowRight className="ml-2 h-4 w-4" />
                 </Button>
               </Link>
-              <Link to="/trade">
+              <Link to="/demo">
                 <Button size="lg" variant="outline">Try demo</Button>
               </Link>
             </div>
@@ -252,7 +252,7 @@ function Landing() {
             <h2 className="text-3xl font-bold tracking-tight md:text-4xl">Popular markets</h2>
             <p className="mt-2 text-muted-foreground">Real-time, 24/7 — no overnight gaps.</p>
           </div>
-          <Link to="/trade" className="text-sm text-primary hover:underline">
+          <Link to="/demo" className="text-sm text-primary hover:underline">
             Explore all markets →
           </Link>
         </div>
@@ -275,7 +275,7 @@ function Landing() {
                     {m.chg >= 0 ? "+" : ""}{m.chg.toFixed(2)}%
                   </td>
                   <td className="hidden px-4 py-3 text-right md:table-cell">
-                    <Link to="/trade">
+                    <Link to="/demo">
                       <Button size="sm" variant="outline">Trade</Button>
                     </Link>
                   </td>
@@ -350,7 +350,7 @@ function Landing() {
                 Create account
               </Button>
             </Link>
-            <Link to="/trade">
+            <Link to="/demo">
               <Button size="lg" variant="outline">Try demo</Button>
             </Link>
           </div>

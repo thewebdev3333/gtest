@@ -1,5 +1,7 @@
+// src/routes/dashboard.tsx
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { AppShell } from "@/components/layout/AppShell";
+import { AuthGuard } from "@/components/layout/AuthGuard";
 import { useApp, formatMoney } from "@/lib/store";
 import { Card } from "@/components/ui/card";
 import { useEffect, useState } from "react";
@@ -13,10 +15,10 @@ export const Route = createFileRoute("/dashboard")({
       { name: "description", content: "Your trading dashboard at a glance." },
     ],
   }),
-  component: Home,
+  component: DashboardPage,
 });
 
-function Home() {
+function DashboardPage() {
   const [recentTrades, setRecentTrades] = useState<Position[]>([]);
   const [loading, setLoading] = useState(true);
   
@@ -75,85 +77,80 @@ function Home() {
     return 'text-muted-foreground';
   };
 
-  const getStatusLabel = (status: string, outcome?: string) => {
-    if (status === 'open') return 'Open';
-    if (outcome === 'win') return 'Won';
-    if (outcome === 'loss') return 'Lost';
-    return status;
-  };
-
   return (
-    <AppShell>
-      <div className="mx-auto max-w-6xl space-y-6 p-4 md:p-8">
-        <div>
-          <h1 className="text-2xl font-bold">Welcome back</h1>
-          <p className="text-sm text-muted-foreground">Here's a snapshot of your activity.</p>
-        </div>
-
-        {loading ? (
-          <div className="flex items-center justify-center py-12">
-            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+    <AuthGuard>
+      <AppShell>
+        <div className="mx-auto max-w-6xl space-y-6 p-4 md:p-8">
+          <div>
+            <h1 className="text-2xl font-bold">Welcome back</h1>
+            <p className="text-sm text-muted-foreground">Here's a snapshot of your activity.</p>
           </div>
-        ) : (
-          <>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <Stat 
-                label={`${account === "demo" ? "Demo" : "Real"} Balance`} 
-                value={formatMoney(balance, currency, fxRate)} 
-              />
-              <Stat 
-                label="Total P/L" 
-                value={formatMoney(totalPnl, currency, fxRate)} 
-                pos={totalPnl >= 0} 
-              />
-              <Stat label="Trades" value={String(trades.length)} />
-              <Stat label="Win rate" value={`${winRate.toFixed(1)}%`} />
-            </div>
 
-            <Card className="p-4">
-              <div className="mb-2 flex items-center justify-between">
-                <h2 className="font-semibold">Recent trades</h2>
-                <Link to="/trade" className="text-xs text-primary hover:underline">Open trading →</Link>
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            </div>
+          ) : (
+            <>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <Stat 
+                  label={`${account === "demo" ? "Demo" : "Real"} Balance`} 
+                  value={formatMoney(balance, currency, fxRate)} 
+                />
+                <Stat 
+                  label="Total P/L" 
+                  value={formatMoney(totalPnl, currency, fxRate)} 
+                  pos={totalPnl >= 0} 
+                />
+                <Stat label="Trades" value={String(trades.length)} />
+                <Stat label="Win rate" value={`${winRate.toFixed(1)}%`} />
               </div>
-              {trades.length === 0 && recentTrades.length === 0 ? (
-                <div className="py-8 text-center text-sm text-muted-foreground">
-                  No trades yet. Head to the Trade tab to place your first.
+
+              <Card className="p-4">
+                <div className="mb-2 flex items-center justify-between">
+                  <h2 className="font-semibold">Recent trades</h2>
+                  <Link to="/trade" className="text-xs text-primary hover:underline">Open trading →</Link>
                 </div>
-              ) : (
-                <div className="divide-y divide-border">
-                  {(trades.length > 0 ? trades : recentTrades.map((p: Position) => ({
-                    id: p.id,
-                    direction: p.direction,
-                    stake: parseFloat(p.stake),
-                    pnl: p.outcome === 'win' ? parseFloat(p.potential_payout) - parseFloat(p.stake) : p.outcome === 'loss' ? -parseFloat(p.stake) : 0,
-                    status: p.status === 'open' ? 'open' : p.outcome === 'win' ? 'won' : 'lost',
-                    entryAt: new Date(p.created_at).getTime(),
-                    contract: p.contract_type,
-                    volatility: p.symbol,
-                  }))).slice(0, 10).map((t: any) => (
-                    <div key={t.id} className="flex items-center justify-between py-2 text-sm">
-                      <div>
-                        <div className="font-medium capitalize">{t.direction}</div>
-                        <div className="text-xs text-muted-foreground">
-                          {new Date(t.entryAt).toLocaleString()}
-                          {t.contract && ` · ${t.contract.replace('_', ' ')}`}
+                {trades.length === 0 && recentTrades.length === 0 ? (
+                  <div className="py-8 text-center text-sm text-muted-foreground">
+                    No trades yet. Head to the Trade tab to place your first.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-border">
+                    {(trades.length > 0 ? trades : recentTrades.map((p: Position) => ({
+                      id: p.id,
+                      direction: p.direction,
+                      stake: parseFloat(p.stake),
+                      pnl: p.outcome === 'win' ? parseFloat(p.potential_payout) - parseFloat(p.stake) : p.outcome === 'loss' ? -parseFloat(p.stake) : 0,
+                      status: p.status === 'open' ? 'open' : p.outcome === 'win' ? 'won' : 'lost',
+                      entryAt: new Date(p.created_at).getTime(),
+                      contract: p.contract_type,
+                      volatility: p.symbol,
+                    }))).slice(0, 10).map((t: any) => (
+                      <div key={t.id} className="flex items-center justify-between py-2 text-sm">
+                        <div>
+                          <div className="font-medium capitalize">{t.direction}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {new Date(t.entryAt).toLocaleString()}
+                            {t.contract && ` · ${t.contract.replace('_', ' ')}`}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div>{formatMoney(t.stake, currency, fxRate)}</div>
+                          <div className={`text-xs ${getStatusColor(t.status, t.outcome)}`}>
+                            {t.status === 'open' ? 'Open' : `${(t.pnl ?? 0) >= 0 ? '+' : ''}${formatMoney(t.pnl ?? 0, currency, fxRate)}`}
+                          </div>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <div>{formatMoney(t.stake, currency, fxRate)}</div>
-                        <div className={`text-xs ${getStatusColor(t.status, t.outcome)}`}>
-                          {t.status === 'open' ? 'Open' : `${(t.pnl ?? 0) >= 0 ? '+' : ''}${formatMoney(t.pnl ?? 0, currency, fxRate)}`}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </Card>
-          </>
-        )}
-      </div>
-    </AppShell>
+                    ))}
+                  </div>
+                )}
+              </Card>
+            </>
+          )}
+        </div>
+      </AppShell>
+    </AuthGuard>
   );
 }
 

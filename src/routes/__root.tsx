@@ -1,3 +1,4 @@
+// src/routes/__root.tsx
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   Outlet,
@@ -94,6 +95,8 @@ function RootComponent() {
   const connectWebSocket = useApp((s) => s.connectWebSocket);
   const disconnectWebSocket = useApp((s) => s.disconnectWebSocket);
   const volatility = useApp((s) => s.volatility);
+  const trades = useApp((s) => s.trades);
+  const setTrades = useApp((s) => s.setTrades);
 
   useEffect(() => {
     const initApp = async () => {

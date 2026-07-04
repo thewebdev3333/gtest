@@ -17,6 +17,7 @@ import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as RiskRouteImport } from './routes/risk'
 import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as DemoRouteImport } from './routes/demo'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as CookiesRouteImport } from './routes/cookies'
 import { Route as AccountRouteImport } from './routes/account'
@@ -62,6 +63,11 @@ const LoginRoute = LoginRouteImport.update({
   path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DemoRoute = DemoRouteImport.update({
+  id: '/demo',
+  path: '/demo',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const DashboardRoute = DashboardRouteImport.update({
   id: '/dashboard',
   path: '/dashboard',
@@ -88,6 +94,7 @@ export interface FileRoutesByFullPath {
   '/account': typeof AccountRoute
   '/cookies': typeof CookiesRoute
   '/dashboard': typeof DashboardRoute
+  '/demo': typeof DemoRoute
   '/login': typeof LoginRoute
   '/privacy': typeof PrivacyRoute
   '/risk': typeof RiskRoute
@@ -102,6 +109,7 @@ export interface FileRoutesByTo {
   '/account': typeof AccountRoute
   '/cookies': typeof CookiesRoute
   '/dashboard': typeof DashboardRoute
+  '/demo': typeof DemoRoute
   '/login': typeof LoginRoute
   '/privacy': typeof PrivacyRoute
   '/risk': typeof RiskRoute
@@ -117,6 +125,7 @@ export interface FileRoutesById {
   '/account': typeof AccountRoute
   '/cookies': typeof CookiesRoute
   '/dashboard': typeof DashboardRoute
+  '/demo': typeof DemoRoute
   '/login': typeof LoginRoute
   '/privacy': typeof PrivacyRoute
   '/risk': typeof RiskRoute
@@ -133,6 +142,7 @@ export interface FileRouteTypes {
     | '/account'
     | '/cookies'
     | '/dashboard'
+    | '/demo'
     | '/login'
     | '/privacy'
     | '/risk'
@@ -147,6 +157,7 @@ export interface FileRouteTypes {
     | '/account'
     | '/cookies'
     | '/dashboard'
+    | '/demo'
     | '/login'
     | '/privacy'
     | '/risk'
@@ -161,6 +172,7 @@ export interface FileRouteTypes {
     | '/account'
     | '/cookies'
     | '/dashboard'
+    | '/demo'
     | '/login'
     | '/privacy'
     | '/risk'
@@ -176,6 +188,7 @@ export interface RootRouteChildren {
   AccountRoute: typeof AccountRoute
   CookiesRoute: typeof CookiesRoute
   DashboardRoute: typeof DashboardRoute
+  DemoRoute: typeof DemoRoute
   LoginRoute: typeof LoginRoute
   PrivacyRoute: typeof PrivacyRoute
   RiskRoute: typeof RiskRoute
@@ -244,6 +257,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/demo': {
+      id: '/demo'
+      path: '/demo'
+      fullPath: '/demo'
+      preLoaderRoute: typeof DemoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/dashboard': {
       id: '/dashboard'
       path: '/dashboard'
@@ -280,6 +300,7 @@ const rootRouteChildren: RootRouteChildren = {
   AccountRoute: AccountRoute,
   CookiesRoute: CookiesRoute,
   DashboardRoute: DashboardRoute,
+  DemoRoute: DemoRoute,
   LoginRoute: LoginRoute,
   PrivacyRoute: PrivacyRoute,
   RiskRoute: RiskRoute,

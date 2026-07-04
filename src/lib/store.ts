@@ -1,4 +1,4 @@
-// store.ts
+// src/lib/store.ts
 import { create } from "zustand";
 import { toast } from "sonner";
 import { 
@@ -19,6 +19,7 @@ import {
   setToken,
   removeToken,
   mapSymbolToBackend,
+  settleTrade,
   type Position,
   type Transaction,
   type WithdrawalRequest,
@@ -91,7 +92,8 @@ export interface AutoTradeConfig {
   wins: number;
   losses: number;
   startedAt: number | null;
-  aiDecision?: AIDecision | null; // ✅ Added for AI
+  aiDecision?: AIDecision | null;
+  currentContractId?: string | null; // ✅ Track the current auto trade contract
 }
 
 export interface AutoTradeResult {
@@ -109,27 +111,20 @@ export interface AutoTradeResult {
 }
 
 interface AppState {
-  // Theme & UI
   theme: Theme;
   setTheme: (t: Theme) => void;
   currency: Currency;
   setCurrency: (c: Currency) => void;
   fxRate: number;
-  
-  // Account
   account: AccountKind;
   setAccount: (a: AccountKind) => void;
   demoBalance: number;
   realBalance: number;
   deposit: (usd: number, to: AccountKind) => void;
-  
-  // Auth
   isAuthenticated: boolean;
   user: { id: string; email: string; name: string } | null;
   setAuthenticated: (status: boolean, user?: { id: string; email: string; name: string }) => void;
   logout: () => void;
-  
-  // Trading
   volatility: VolatilityId;
   setVolatility: (v: VolatilityId) => void;
   contract: ContractType;
@@ -139,40 +134,27 @@ interface AppState {
   setPrice: (p: number) => void;
   resetPrice: (p: number) => void;
   trades: Trade[];
+  setTrades: (trades: Trade[]) => void;
   openTrade: (t: Omit<Trade, "id" | "status" | "entryAt" | "expiresAt"> & { entryAt?: number }) => Trade;
-  settleTrade: (id: string, exitPrice: number) => void;
-  
-  // Chart
+  settleTrade: (id: string, exitPrice: number) => Promise<Trade | undefined>;
   crosshairEnabled: boolean;
   toggleCrosshair: () => void;
-  
-  // Loading & Errors
   isLoading: boolean;
   error: string | null;
-  
-  // WebSocket
   ws: MarketWebSocket | null;
   isConnected: boolean;
-  
-  // KYC
   kycStatus: 'none' | 'pending' | 'approved' | 'rejected';
-  
-  // Auto Trade
   autoTrade: AutoTradeConfig;
   startAutoTrade: (config: Partial<AutoTradeConfig>) => void;
   stopAutoTrade: (skipModal?: boolean) => void;
   placeAutoTrade: () => Promise<void>;
   handleAutoTradeSettlement: (trade: Trade) => void;
-  
-  // Auto Trade Result Modal
   autoTradeResult: {
     show: boolean;
     result: AutoTradeResult | null;
   };
   showAutoTradeResult: (result: AutoTradeResult) => void;
   hideAutoTradeResult: () => void;
-  
-  // Data fetching
   fetchUserData: () => Promise<void>;
   fetchBalances: () => Promise<void>;
   fetchExchangeRate: () => Promise<void>;
@@ -180,8 +162,6 @@ interface AppState {
   syncAll: () => Promise<void>;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
-  
-  // WebSocket management
   connectWebSocket: () => void;
   disconnectWebSocket: () => void;
   subscribeToMarket: (symbol: string) => void;
@@ -248,6 +228,7 @@ const initialAutoTrade: AutoTradeConfig = {
   losses: 0,
   startedAt: null,
   aiDecision: null,
+  currentContractId: null,
 };
 
 const initialAutoTradeResult = {
@@ -262,14 +243,11 @@ export const useApp = create<AppState>((set, get) => {
   let wsInstance: MarketWebSocket | null = null;
   
   return {
-    // ── Theme ──────────────────────────────────────────────────────
     theme: prefs.theme ?? "dark",
     setTheme: (t) => {
       set({ theme: t });
       savePrefs(get());
     },
-    
-    // ── Currency ──────────────────────────────────────────────────
     currency: prefs.currency ?? "USD",
     setCurrency: (c) => {
       set({ currency: c });
@@ -277,7 +255,6 @@ export const useApp = create<AppState>((set, get) => {
     },
     fxRate: 129.5,
 
-    // ── Account ───────────────────────────────────────────────────
     account: prefs.account ?? "demo",
     setAccount: (a) => {
       set({ account: a });
@@ -294,7 +271,6 @@ export const useApp = create<AppState>((set, get) => {
       savePrefs(get());
     },
 
-    // ── Auth ──────────────────────────────────────────────────────
     isAuthenticated: auth.isAuthenticated,
     user: auth.user,
     setAuthenticated: (status, user) => {
@@ -321,7 +297,6 @@ export const useApp = create<AppState>((set, get) => {
       set({ ws: null, isConnected: false });
     },
 
-    // ── Volatility & Contract ────────────────────────────────────
     volatility: "v100_1s",
     setVolatility: (v) => {
       const prev = get().volatility;
@@ -339,14 +314,14 @@ export const useApp = create<AppState>((set, get) => {
     contract: "rise_fall",
     setContract: (c) => set({ contract: c }),
 
-    // ── Price ─────────────────────────────────────────────────────
     price: 204.33,
     prevPrice: 204.33,
     setPrice: (p) => set((s) => ({ price: p, prevPrice: s.price })),
     resetPrice: (p) => set({ price: p, prevPrice: p }),
 
-    // ── Trades ────────────────────────────────────────────────────
     trades: [],
+    setTrades: (trades) => set({ trades }),
+
     openTrade: (t) => {
       const entryAt = t.entryAt ?? Date.now();
       const trade: Trade = {
@@ -365,64 +340,43 @@ export const useApp = create<AppState>((set, get) => {
       return trade;
     },
 
-    settleTrade: (id, exitPrice) => {
+    settleTrade: async (id, exitPrice) => {
       const t = get().trades.find((x) => x.id === id);
       if (!t || t.status !== "open") return;
 
-      let won = false;
-      const lastDigit = Math.floor(exitPrice * 100) % 10;
-      switch (t.direction) {
-        case "rise":
-          won = exitPrice > t.entryPrice;
-          break;
-        case "fall":
-          won = exitPrice < t.entryPrice;
-          break;
-        case "over":
-          won = lastDigit > (t.barrier ?? 5);
-          break;
-        case "under":
-          won = lastDigit < (t.barrier ?? 5);
-          break;
-        case "match":
-          won = lastDigit === (t.barrier ?? 0);
-          break;
-        case "differ":
-          won = lastDigit !== (t.barrier ?? 0);
-          break;
-        case "even":
-          won = lastDigit % 2 === 0;
-          break;
-        case "odd":
-          won = lastDigit % 2 === 1;
-          break;
-      }
+      try {
+        const accountType = get().account;
+        const response = await settleTrade(id, exitPrice, accountType);
+        
+        if (response.success) {
+          const { outcome, pnl, newBalance } = response.data;
+          const won = outcome === 'win';
+          const balKey = get().account === "demo" ? "demoBalance" : "realBalance";
+          
+          const updatedTrade: Trade = { ...t, status: won ? "won" : "lost", exitPrice, pnl };
+          
+          set((s) => ({
+            trades: s.trades.map((x) => (x.id === id ? updatedTrade : x)),
+            [balKey]: newBalance,
+          }) as Partial<AppState>);
+          savePrefs(get());
 
-      const pnl = won ? t.payout - t.stake : -t.stake;
-      const credit = won ? t.payout : 0;
-      const balKey = get().account === "demo" ? "demoBalance" : "realBalance";
-
-      // Build the updated trade object once
-      const updatedTrade: Trade = { ...t, status: won ? "won" : "lost", exitPrice, pnl };
-
-      set((s) => ({
-        trades: s.trades.map((x) => (x.id === id ? updatedTrade : x)),
-        [balKey]: (s[balKey] as number) + credit,
-      }) as Partial<AppState>);
-      savePrefs(get());
-
-      // Auto Trade: Pass the updated trade with pnl
-      const autoTrade = get().autoTrade;
-      if (autoTrade.isRunning) {
-        get().handleAutoTradeSettlement(updatedTrade);
+          const autoTrade = get().autoTrade;
+          if (autoTrade.isRunning) {
+            get().handleAutoTradeSettlement(updatedTrade);
+          }
+          
+          return updatedTrade;
+        }
+      } catch (err) {
+        console.error('[settleTrade] Failed to settle trade:', err);
+        toast.error('Failed to settle trade. Please refresh.');
       }
     },
 
-    // ── Chart ─────────────────────────────────────────────────────
     crosshairEnabled: true,
     toggleCrosshair: () => set((s) => ({ crosshairEnabled: !s.crosshairEnabled })),
 
-    // ── Loading & Errors ─────────────────────────────────────────
     isLoading: false,
     error: null,
     ws: null,
@@ -432,7 +386,6 @@ export const useApp = create<AppState>((set, get) => {
     setLoading: (loading) => set({ isLoading: loading }),
     setError: (error) => set({ error }),
 
-    // ── Auto Trade ────────────────────────────────────────────────
     autoTrade: initialAutoTrade,
     autoTradeResult: initialAutoTradeResult,
 
@@ -484,6 +437,7 @@ export const useApp = create<AppState>((set, get) => {
           durationVal: config.durationVal || current.durationVal,
           barrier: config.barrier !== undefined ? config.barrier : current.barrier,
           aiDecision: config.aiDecision || null,
+          currentContractId: null,
         }
       });
       
@@ -523,6 +477,7 @@ export const useApp = create<AppState>((set, get) => {
           ...current,
           isRunning: false,
           enabled: false,
+          currentContractId: null,
         }
       });
       
@@ -601,77 +556,97 @@ export const useApp = create<AppState>((set, get) => {
         return;
       }
       
-      // Check balance
-      const balKey = state.account === "demo" ? "demoBalance" : "realBalance";
-      const balance = state[balKey] as number;
-      if (balance < autoTrade.stake) {
-        const stoppedAt = Date.now();
-        get().showAutoTradeResult({
-          reason: 'insufficient_balance',
-          totalPnl: autoTrade.totalPnl,
-          tradesCount: autoTrade.tradesCount,
-          wins: autoTrade.wins,
-          losses: autoTrade.losses,
-          startedAt: autoTrade.startedAt,
-          stoppedAt: stoppedAt,
-          direction: autoTrade.direction,
-          contract: autoTrade.contract,
-          stopLoss: autoTrade.stopLoss,
-          takeProfit: autoTrade.takeProfit,
-        });
-        state.stopAutoTrade(true);
-        return;
-      }
-      
-      // Calculate payout
+      // ── ✅ CALL THE REAL BACKEND API ──────────────────────────────────
       const payout = autoTrade.stake * PAYOUT_MULTIPLIER[autoTrade.contract];
-      const durationMs = autoTrade.durationMs;
-      const currentPrice = state.price;
-      
-      // Prepare trade data
-      const tradeData: Omit<Trade, "id" | "status" | "entryAt" | "expiresAt"> & { entryAt?: number } = {
-        contract: autoTrade.contract,
-        direction: autoTrade.direction,
-        volatility: autoTrade.volatility,
-        stake: autoTrade.stake,
-        payout: payout,
-        durationMs: durationMs,
-        entryPrice: currentPrice,
-      };
-      
-      if (autoTrade.barrier !== undefined) {
-        tradeData.barrier = autoTrade.barrier;
-      }
+      const durationTicks = Math.max(2, Math.round(autoTrade.durationMs / 1000));
       
       try {
-        const trade = state.openTrade(tradeData);
-        
-        console.log(`[Auto Trade] Placed trade #${autoTrade.tradesCount + 1}: ${trade.id} ${autoTrade.direction} @ ${trade.entryPrice} (${durationMs}ms)`);
-        
-        set((s) => ({
-          autoTrade: {
-            ...s.autoTrade,
-            tradesCount: s.autoTrade.tradesCount + 1,
-          }
-        }));
-        
-      } catch (err) {
-        console.error('[Auto Trade] Error placing trade:', err);
-        const stoppedAt = Date.now();
-        get().showAutoTradeResult({
-          reason: 'error',
-          totalPnl: autoTrade.totalPnl,
-          tradesCount: autoTrade.tradesCount,
-          wins: autoTrade.wins,
-          losses: autoTrade.losses,
-          startedAt: autoTrade.startedAt,
-          stoppedAt: stoppedAt,
+        const response = await placeTrade({
+          accountType: state.account,
+          symbol: autoTrade.volatility,
+          contractType: autoTrade.contract,
           direction: autoTrade.direction,
-          contract: autoTrade.contract,
-          stopLoss: autoTrade.stopLoss,
-          takeProfit: autoTrade.takeProfit,
+          selectedDigit: autoTrade.barrier,
+          stake: autoTrade.stake,
+          durationTicks: Math.min(durationTicks, 3600),
         });
-        state.stopAutoTrade(true);
+
+        if (response.success) {
+          console.log(`[Auto Trade] Placed trade #${autoTrade.tradesCount + 1}: ${response.data.contractId} ${autoTrade.direction} @ ${response.data.entryPrice}`);
+          
+          const contractId = response.data.contractId;
+          
+          // Add to local trades list for UI display
+          const trade: Trade = {
+            id: contractId,
+            contract: autoTrade.contract,
+            direction: autoTrade.direction,
+            volatility: autoTrade.volatility,
+            stake: autoTrade.stake,
+            payout: payout,
+            durationMs: autoTrade.durationMs,
+            entryPrice: response.data.entryPrice,
+            entryAt: Date.now(),
+            expiresAt: Date.now() + autoTrade.durationMs,
+            barrier: autoTrade.barrier,
+            status: "open",
+            exitPrice: undefined,
+            pnl: undefined,
+          };
+          
+          set((s) => ({
+            trades: [trade, ...s.trades],
+            autoTrade: {
+              ...s.autoTrade,
+              tradesCount: s.autoTrade.tradesCount + 1,
+              currentContractId: contractId,
+            }
+          }));
+          
+          // Refresh balances to get updated balance from backend
+          await get().fetchBalances();
+          
+        } else {
+          console.error('[Auto Trade] Failed to place trade:', response);
+          const stoppedAt = Date.now();
+          get().showAutoTradeResult({
+            reason: 'insufficient_balance',
+            totalPnl: autoTrade.totalPnl,
+            tradesCount: autoTrade.tradesCount,
+            wins: autoTrade.wins,
+            losses: autoTrade.losses,
+            startedAt: autoTrade.startedAt,
+            stoppedAt: stoppedAt,
+            direction: autoTrade.direction,
+            contract: autoTrade.contract,
+            stopLoss: autoTrade.stopLoss,
+            takeProfit: autoTrade.takeProfit,
+          });
+          state.stopAutoTrade(true);
+        }
+        
+      } catch (err: any) {
+        console.error('[Auto Trade] Error placing trade:', err);
+        
+        if (err.message?.includes('INSUFFICIENT_BALANCE') || err.message?.includes('Insufficient balance')) {
+          const stoppedAt = Date.now();
+          get().showAutoTradeResult({
+            reason: 'insufficient_balance',
+            totalPnl: autoTrade.totalPnl,
+            tradesCount: autoTrade.tradesCount,
+            wins: autoTrade.wins,
+            losses: autoTrade.losses,
+            startedAt: autoTrade.startedAt,
+            stoppedAt: stoppedAt,
+            direction: autoTrade.direction,
+            contract: autoTrade.contract,
+            stopLoss: autoTrade.stopLoss,
+            takeProfit: autoTrade.takeProfit,
+          });
+          state.stopAutoTrade(true);
+        } else {
+          toast.error('Failed to place auto trade: ' + err.message);
+        }
       }
     },
 
@@ -695,8 +670,12 @@ export const useApp = create<AppState>((set, get) => {
           totalPnl: newTotalPnl,
           wins,
           losses,
+          currentContractId: null,
         }
       }));
+      
+      // Refresh balances after settlement
+      get().fetchBalances();
       
       // Check stop loss
       if (newTotalPnl <= -autoTrade.stopLoss) {
@@ -744,7 +723,6 @@ export const useApp = create<AppState>((set, get) => {
       }, 1000);
     },
 
-    // ── Data Fetching ─────────────────────────────────────────────
     fetchUserData: async () => {
       try {
         set({ isLoading: true, error: null });
@@ -842,7 +820,6 @@ export const useApp = create<AppState>((set, get) => {
       ]);
     },
 
-    // ── WebSocket ──────────────────────────────────────────────────
     connectWebSocket: () => {
       if (wsInstance) {
         wsInstance.disconnect();
@@ -862,8 +839,35 @@ export const useApp = create<AppState>((set, get) => {
       });
       
       wsInstance.on('contract_settled', (data) => {
+        console.log('[WS] Contract settled:', data);
+        
+        // ✅ Sync trades and balances from the backend
         get().syncTrades();
         get().fetchBalances();
+        
+        // ✅ If auto trade is running, check if this is our auto trade contract
+        const autoTrade = get().autoTrade;
+        if (autoTrade.isRunning && data.contractId === autoTrade.currentContractId) {
+          // Find the trade in our local list
+          const trade = get().trades.find(t => t.id === data.contractId);
+          if (trade && trade.status === 'open') {
+            // Update the trade with the settlement data
+            const updatedTrade: Trade = {
+              ...trade,
+              status: data.outcome === 'win' ? 'won' : 'lost',
+              exitPrice: data.exitPrice,
+              pnl: data.pnl,
+            };
+            
+            // Update trades list
+            set((s) => ({
+              trades: s.trades.map((t) => t.id === data.contractId ? updatedTrade : t),
+            }));
+            
+            // Let auto trade handle the settlement
+            get().handleAutoTradeSettlement(updatedTrade);
+          }
+        }
       });
 
       wsInstance.on('transaction_updated', (data) => {

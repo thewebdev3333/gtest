@@ -195,6 +195,8 @@ export async function depositMpesa(
     formattedPhone = '254' + formattedPhone.substring(1)
   } else if (formattedPhone.startsWith('7')) {
     formattedPhone = '254' + formattedPhone
+  } else if (formattedPhone.startsWith('1')) {
+    formattedPhone = '254' + formattedPhone
   } else if (formattedPhone.startsWith('+254')) {
     formattedPhone = formattedPhone.substring(1)
   }
@@ -206,26 +208,6 @@ export async function depositMpesa(
   })
 }
 
-// Add this to api.ts after the other wallet endpoints
-
-export interface PendingTransactionStatus {
-  id: string
-  status: 'pending' | 'completed' | 'failed'
-  amount_usd: string
-  amount_kes: string
-}
-
-export interface PendingTransactionResponse {
-  success: true
-  data: {
-    transactions: PendingTransactionStatus[]
-    hasPending: boolean
-  }
-}
-
-export async function checkPendingTransactions(): Promise<PendingTransactionResponse> {
-  return apiFetch<PendingTransactionResponse>('/wallet/pending/check')
-}
 export interface WithdrawResponse {
   success: true
   data: {
@@ -249,6 +231,8 @@ export async function withdrawMpesa(
   if (formattedPhone.startsWith('0')) {
     formattedPhone = '254' + formattedPhone.substring(1)
   } else if (formattedPhone.startsWith('7')) {
+    formattedPhone = '254' + formattedPhone
+  } else if (formattedPhone.startsWith('1')) {
     formattedPhone = '254' + formattedPhone
   } else if (formattedPhone.startsWith('+254')) {
     formattedPhone = formattedPhone.substring(1)
@@ -342,9 +326,14 @@ export interface PayoutPreviewResponse {
 
 export async function getPayoutPreview(
   contractType: string,
-  stake: number
+  stake: number,
+  direction?: string,
+  selectedDigit?: number
 ): Promise<PayoutPreviewResponse> {
-  return apiFetch(`/trade/payout-preview?contractType=${contractType}&stake=${stake}`)
+  let url = `/trade/payout-preview?contractType=${contractType}&stake=${stake}`
+  if (direction) url += `&direction=${direction}`
+  if (selectedDigit !== undefined) url += `&selectedDigit=${selectedDigit}`
+  return apiFetch<PayoutPreviewResponse>(url)
 }
 
 export interface PlaceTradeRequest {
@@ -416,6 +405,29 @@ export async function getPosition(id: string): Promise<{
   return apiFetch(`/positions/${id}`)
 }
 
+// ── ✅ NEW: Settle Trade API ─────────────────────────────────────
+
+export interface SettleTradeResponse {
+  success: true
+  data: {
+    contractId: string
+    outcome: 'win' | 'loss'
+    pnl: number
+    newBalance: number
+  }
+}
+
+export async function settleTrade(
+  contractId: string,
+  exitPrice: number,
+  accountType: 'demo' | 'real'
+): Promise<SettleTradeResponse> {
+  return apiFetch<SettleTradeResponse>(`/trade/settle/${contractId}`, {
+    method: 'POST',
+    body: JSON.stringify({ exitPrice, accountType }),
+  })
+}
+
 // ── WebSocket ────────────────────────────────────────────────────
 
 export class MarketWebSocket {
@@ -434,7 +446,6 @@ export class MarketWebSocket {
   }
 
   connect() {
-    // Build URL with token for authentication
     let url = WS_URL
     if (this.token) {
       url = `${WS_URL}?token=${this.token}`
@@ -448,7 +459,6 @@ export class MarketWebSocket {
       this.reconnectAttempts = 0
       this.emit('connected', { connected: true })
       
-      // Re-subscribe to all symbols after reconnection
       for (const symbol of this.subscribedSymbols) {
         this.subscribe(symbol)
       }
@@ -477,7 +487,6 @@ export class MarketWebSocket {
   }
 
   private handleMessage(data: any) {
-    // ✅ FIX: Use 'event' first, fallback to 'type'
     const messageType = data.event ?? data.type
 
     switch (messageType) {
