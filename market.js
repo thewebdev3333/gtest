@@ -76,8 +76,23 @@ const PAYOUT_MULTIPLIERS = {
   match_differ: 8.00,
 }
 
-function calculatePayout(contractType, stake) {
-  const multiplier = PAYOUT_MULTIPLIERS[contractType] ?? 1.88
+// Edge cases for Over/Under (barrier 0 + over, barrier 9 + under)
+const OVER_UNDER_EDGE_MULTIPLIER = 1.19
+
+// ✅ FIX: Accept all 4 arguments
+function calculatePayout(contractType, stake, direction = null, selectedDigit = null) {
+  let multiplier = PAYOUT_MULTIPLIERS[contractType] ?? 1.88
+  
+  // Special case: Over/Under edge barriers
+  if (contractType === 'over_under' && direction && selectedDigit !== null) {
+    const isEdge = (selectedDigit === 0 && direction === 'over') || 
+                   (selectedDigit === 9 && direction === 'under')
+    if (isEdge) {
+      multiplier = OVER_UNDER_EDGE_MULTIPLIER
+      console.log(`[Payout] Edge case detected: ${direction} ${selectedDigit} → multiplier ${multiplier}`)
+    }
+  }
+  
   return parseFloat((stake * multiplier).toFixed(8))
 }
 
@@ -93,9 +108,12 @@ function resolveOutcome(contract, exitPrice) {
       return dir === 'rise' ? (exit > entry ? 'win' : 'loss')
                             : (exit < entry ? 'win' : 'loss')
 
-    case 'over_under':
-      return dir === 'over' ? (exit > entry ? 'win' : 'loss')
-                            : (exit < entry ? 'win' : 'loss')
+    case 'over_under': {
+      const selectedDigit = contract.selected_digit ?? 5
+      const lastDigit = Math.floor(exit) % 10
+      return dir === 'over' ? (lastDigit > selectedDigit ? 'win' : 'loss')
+                            : (lastDigit < selectedDigit ? 'win' : 'loss')
+    }
 
     case 'even_odd': {
       const lastDigit = Math.floor(exit) % 10
@@ -104,10 +122,10 @@ function resolveOutcome(contract, exitPrice) {
     }
 
     case 'match_differ': {
+      const selectedDigit = contract.selected_digit ?? 0
       const exitDigit = Math.floor(exit) % 10
-      const entryDigit = Math.floor(entry) % 10
-      return dir === 'match' ? (exitDigit === entryDigit ? 'win' : 'loss')
-                             : (exitDigit !== entryDigit ? 'win' : 'loss')
+      return dir === 'match' ? (exitDigit === selectedDigit ? 'win' : 'loss')
+                             : (exitDigit !== selectedDigit ? 'win' : 'loss')
     }
 
     default: return 'loss'
@@ -308,6 +326,8 @@ module.exports = {
   handleWsConnection,
   getLatestTick,
   calculatePayout,
+  resolveOutcome,
   SYMBOLS,
   PAYOUT_MULTIPLIERS,
+  OVER_UNDER_EDGE_MULTIPLIER,
 }
