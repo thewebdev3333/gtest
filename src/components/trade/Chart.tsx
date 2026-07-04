@@ -164,14 +164,10 @@ export function PriceChart() {
     
     console.log('[Chart] Volatility changed to:', volatility, '- Resetting chart');
     
-    // Clear all data
     seriesRef.current.setData([]);
-    
-    // Reset history flag and last time
     hasReceivedHistoryRef.current = false;
     lastTimeRef.current = Math.floor(Date.now() / 1000) - 1;
     
-    // Remove all entry lines
     for (const [id, line] of entryLinesRef.current) {
       try {
         seriesRef.current.removePriceLine(line);
@@ -181,10 +177,8 @@ export function PriceChart() {
     }
     entryLinesRef.current.clear();
     
-    // Fit content to show empty state
     chartRef.current.timeScale().fitContent();
     
-    // Generate fresh seed data for the new symbol
     const now = Math.floor(Date.now() / 1000);
     const seed: { time: UTCTimestamp; value: number }[] = [];
     let p = useApp.getState().price;
@@ -203,7 +197,6 @@ export function PriceChart() {
     if (!ws || !seriesRef.current || !isReady) return;
 
     const handleHistory = (data: any) => {
-      // Only process history for the current symbol
       if (data.symbol !== volatility) {
         console.log('[Chart] Ignoring history for', data.symbol, '(current:', volatility, ')');
         return;
@@ -217,12 +210,8 @@ export function PriceChart() {
           value: tick.price,
         }));
         
-        // Replace seed data with real history
         seriesRef.current?.setData(chartData);
-        
-        // Set lastTimeRef to the last historical timestamp
         lastTimeRef.current = chartData[chartData.length - 1].time as number;
-        
         chartRef.current?.timeScale().fitContent();
         hasReceivedHistoryRef.current = true;
         console.log('[Chart] Loaded history data:', chartData.length, 'points for', data.symbol);
@@ -230,6 +219,14 @@ export function PriceChart() {
     };
 
     ws.on('history', handleHistory);
+
+    // ✅ NEW: force a fresh history push now that our listener is guaranteed to
+    // be attached. `ws.subscribe()` is idempotent server-side (the backend just
+    // re-adds this socket to a Set and re-sends history + latest tick), so this
+    // is safe to call even if the store's own `connected` handler already
+    // subscribed earlier. This closes the startup race where that earlier
+    // subscribe's `history` response could arrive before this effect ever ran.
+    ws.subscribe(volatility);
 
     return () => {
       ws.off('history', handleHistory);
@@ -247,7 +244,7 @@ export function PriceChart() {
     
   }, [price, isReady]);
 
-  // ── ✅ FIX: Entry markers - filter by volatility ─────────────────
+  // ── Entry markers - filter by volatility ─────────────────────────
   useEffect(() => {
     const series = seriesRef.current;
     if (!series) return;
@@ -255,7 +252,6 @@ export function PriceChart() {
     const lines = entryLinesRef.current;
     const openIds = new Set<string>();
 
-    // ✅ Only draw entry lines for trades that match the current volatility
     for (const t of trades) {
       if (t.status === "open" && t.volatility === volatility) {
         openIds.add(t.id);
@@ -268,14 +264,13 @@ export function PriceChart() {
             lineWidth: 1,
             lineStyle: LineStyle.Dashed,
             axisLabelVisible: true,
-            title: `${t.direction.toUpperCase()} entry`,
+            title: `${t.direction.toUpperCase()} entry @ ${t.entryPrice.toFixed(3)}`,
           });
           lines.set(t.id, line);
         }
       }
     }
 
-    // Remove lines for trades that are no longer open or don't match current volatility
     for (const [id, line] of lines) {
       if (!openIds.has(id)) {
         try {
@@ -286,7 +281,7 @@ export function PriceChart() {
         lines.delete(id);
       }
     }
-  }, [trades, volatility]); // ✅ Added volatility to dependencies
+  }, [trades, volatility]);
 
   // ── Zoom controls via window event ──────────────────────────────
   useEffect(() => {

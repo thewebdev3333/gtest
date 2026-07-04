@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+// src/components/trade/TradeControls.tsx
+import { useEffect, useMemo, useState } from "react";
 import {
   useApp,
   NEGATIVE_DIRECTIONS,
@@ -7,17 +8,12 @@ import {
   type Direction,
   type DurationUnit,
 } from "@/lib/store";
-import { placeTrade } from "@/lib/api";
+import { placeTrade, getPayoutPreview } from "@/lib/api";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { Minus, Plus } from "lucide-react";
 
-const PAYOUT_MULTIPLIER: Record<ContractType, number> = {
-  rise_fall: 1.836,
-  over_under: 1.85,
-  match_differ: 1.236,
-  even_odd: 1.95,
-};
+// ❌ REMOVED hardcoded PAYOUT_MULTIPLIER — now fetched live from backend
 
 const UNIT_TO_MS: Record<DurationUnit, number> = {
   ticks: 1000,
@@ -32,7 +28,7 @@ const UNIT_MAX: Record<DurationUnit, number> = {
   minutes: 60,
   hours: 1,
 };
-const UNIT_MIN: Record<DurationUnit, number> = { ticks: 1, seconds: 5, minutes: 1, hours: 1 };
+const UNIT_MIN: Record<DurationUnit, number> = { ticks: 2, seconds: 5, minutes: 1, hours: 1 };
 
 const STAKE_PRESETS = [2, 5, 10, 25, 50, 100];
 
@@ -80,17 +76,36 @@ export function TradeControls() {
   const [durationVal, setDurationVal] = useState<number>(10);
   const [stake, setStake] = useState<number>(5);
   const [barrier, setBarrier] = useState<number>(0);
+  const [payout, setPayout] = useState<number>(0);
+  const [payoutLoading, setPayoutLoading] = useState<boolean>(false);
 
   useMemo(() => {
     if (!dirs.some((d) => d.id === direction)) setDirection(dirs[0].id);
   }, [contract]);
 
   const isNegative = NEGATIVE_DIRECTIONS.includes(direction);
-  const payout = stake * PAYOUT_MULTIPLIER[contract];
+
+  // ✅ NEW: fetch the live payout preview whenever relevant inputs change
+  useEffect(() => {
+    let cancelled = false;
+    setPayoutLoading(true);
+    const t = setTimeout(async () => {
+      try {
+        const digit = (contract === 'over_under' || contract === 'match_differ') ? barrier : undefined;
+        const res = await getPayoutPreview(contract, stake, direction, digit);
+        if (!cancelled && res.success) setPayout(res.data.potentialPayout);
+      } catch {
+        // keep the last known payout on a transient error; don't blank the UI
+      } finally {
+        if (!cancelled) setPayoutLoading(false);
+      }
+    }, 150);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [contract, stake, direction, barrier]);
 
   const buy = async () => {
-    if (stake < 2) {
-      toast.error("Minimum stake is $2");
+    if (stake < 1) {
+      toast.error("Minimum stake is $1");
       return;
     }
     if (stake > balance) {
@@ -277,10 +292,11 @@ export function TradeControls() {
         className={`w-full rounded-md py-3 font-bold text-white transition ${
           isNegative ? "bg-destructive hover:bg-destructive/90" : "bg-primary hover:bg-primary/90"
         }`}
+        disabled={payoutLoading}
       >
         <div>Buy</div>
         <div className="text-xs font-medium opacity-90">
-          Potential Payout: {formatMoney(payout, currency, fxRate)}
+          Potential Payout: {payoutLoading ? "..." : formatMoney(payout, currency, fxRate)}
         </div>
       </button>
     </div>
