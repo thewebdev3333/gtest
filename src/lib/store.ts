@@ -238,7 +238,6 @@ const initialAutoTradeResult = {
   result: null,
 };
 
-// ✅ NEW: module-level guard to prevent double-settlement for auto-trade contracts
 const autoSettledContractIds = new Set<string>();
 
 export const useApp = create<AppState>((set, get) => {
@@ -366,7 +365,6 @@ export const useApp = create<AppState>((set, get) => {
           }) as Partial<AppState>);
           savePrefs(get());
 
-          // ✅ CHANGED: only the tracked auto-trade contract, and only once
           const autoTrade = get().autoTrade;
           if (
             autoTrade.isRunning &&
@@ -662,8 +660,9 @@ export const useApp = create<AppState>((set, get) => {
             }
           }));
           
-          // Refresh balances to get updated balance from backend
-          await get().fetchBalances();
+          // ✅ FIX: Immediately sync to ensure local state matches backend
+          // This is critical for auto-trade to track the contract correctly
+          await get().syncAll();
           
         } else {
           console.error('[Auto Trade] Failed to place trade:', response);
@@ -729,7 +728,6 @@ export const useApp = create<AppState>((set, get) => {
           totalPnl: newTotalPnl,
           wins,
           losses,
-          currentContractId: null,
         }
       }));
       
@@ -752,6 +750,13 @@ export const useApp = create<AppState>((set, get) => {
           stopLoss: autoTrade.stopLoss,
           takeProfit: autoTrade.takeProfit,
         });
+        // ✅ Clear currentContractId only after settlement is fully processed
+        set((s) => ({
+          autoTrade: {
+            ...s.autoTrade,
+            currentContractId: null,
+          }
+        }));
         state.stopAutoTrade(true);
         return;
       }
@@ -772,9 +777,24 @@ export const useApp = create<AppState>((set, get) => {
           stopLoss: autoTrade.stopLoss,
           takeProfit: autoTrade.takeProfit,
         });
+        // ✅ Clear currentContractId only after settlement is fully processed
+        set((s) => ({
+          autoTrade: {
+            ...s.autoTrade,
+            currentContractId: null,
+          }
+        }));
         state.stopAutoTrade(true);
         return;
       }
+      
+      // ✅ Clear currentContractId after successful settlement and before placing next trade
+      set((s) => ({
+        autoTrade: {
+          ...s.autoTrade,
+          currentContractId: null,
+        }
+      }));
       
       // Place next trade
       setTimeout(() => {
@@ -844,7 +864,6 @@ export const useApp = create<AppState>((set, get) => {
       }
     },
 
-    // ✅ FIXED: syncTrades now merges instead of replacing
     syncTrades: async () => {
       try {
         const accountType = get().account;
@@ -869,17 +888,7 @@ export const useApp = create<AppState>((set, get) => {
           const openIds = new Set(openTrades.map((t) => t.id));
 
           set((s) => {
-            // ✅ CHANGED: keep every local trade that's already settled
-            // (won/lost) — those carry real exitPrice/pnl from settleTrade or
-            // the WS handler and must not be discarded just because the
-            // "open positions" endpoint no longer lists them.
             const alreadySettledLocally = s.trades.filter((t) => t.status !== 'open');
-
-            // Any local trade still marked "open" that the backend no longer
-            // considers open, but that we never received a settlement event
-            // for (e.g. missed WS message): keep it as-is rather than silently
-            // dropping it. It'll get corrected next time an explicit settle
-            // or WS event for it arrives.
             const staleOpenNotYetReconciled = s.trades.filter(
               (t) => t.status === 'open' && !openIds.has(t.id)
             );
@@ -923,7 +932,6 @@ export const useApp = create<AppState>((set, get) => {
       wsInstance.on('contract_settled', (data) => {
         console.log('[WS] Contract settled:', data);
 
-        // ✅ Still sync, but now it merges instead of replacing
         get().syncTrades();
         get().fetchBalances();
 
