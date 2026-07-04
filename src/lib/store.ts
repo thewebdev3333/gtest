@@ -23,6 +23,7 @@ import {
   type Transaction,
   type WithdrawalRequest,
 } from './api'
+import type { AIDecision } from './ai-engine';
 
 export type ContractType = "rise_fall" | "over_under" | "match_differ" | "even_odd";
 export type VolatilityId = "v100_1s" | "v50_1s" | "v25_1s";
@@ -90,6 +91,7 @@ export interface AutoTradeConfig {
   wins: number;
   losses: number;
   startedAt: number | null;
+  aiDecision?: AIDecision | null; // ✅ Added for AI
 }
 
 export interface AutoTradeResult {
@@ -245,6 +247,7 @@ const initialAutoTrade: AutoTradeConfig = {
   wins: 0,
   losses: 0,
   startedAt: null,
+  aiDecision: null,
 };
 
 const initialAutoTradeResult = {
@@ -480,6 +483,7 @@ export const useApp = create<AppState>((set, get) => {
           durationUnit: config.durationUnit || current.durationUnit,
           durationVal: config.durationVal || current.durationVal,
           barrier: config.barrier !== undefined ? config.barrier : current.barrier,
+          aiDecision: config.aiDecision || null,
         }
       });
       
@@ -498,7 +502,6 @@ export const useApp = create<AppState>((set, get) => {
       
       const stoppedAt = Date.now();
       
-      // ✅ Only show modal if skipModal is false (manual stop from UI)
       if (!skipModal) {
         get().showAutoTradeResult({
           reason: 'manual_stop',

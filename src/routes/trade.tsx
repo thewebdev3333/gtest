@@ -7,11 +7,12 @@ import { ContractSelector } from "@/components/trade/ContractSelector";
 import { VolatilityIndicator } from "@/components/trade/VolatilityIndicator";
 import { TradeControls } from "@/components/trade/TradeControls";
 import { AutoTradeControls } from "@/components/trade/AutoTradeControls";
+import { AIControls } from "@/components/trade/AIControls";
 import { Positions } from "@/components/trade/Positions";
 import { AutoTradeResultModal } from "@/components/trade/AutoTradeResultModal";
 import { useApp, formatMoney } from "@/lib/store";
 import { useTickEngine } from "@/lib/tick-engine";
-import { Plus, Minus, Eye, EyeOff, ChevronDown } from "lucide-react";
+import { Brain, Plus, Minus, Eye, EyeOff, ChevronDown } from "lucide-react";
 import {
   Collapsible,
   CollapsibleContent,
@@ -45,6 +46,8 @@ function TradePage() {
   const currency = useApp((s) => s.currency);
   const fxRate = useApp((s) => s.fxRate);
   const totalPnl = trades.reduce((a, t) => a + (t.pnl ?? 0), 0);
+  const autoTrade = useApp((s) => s.autoTrade);
+  const aiDecision = useApp((s) => s.autoTrade.aiDecision);
   
   // Auto Trade Result Modal
   const autoTradeResult = useApp((s) => s.autoTradeResult);
@@ -108,15 +111,30 @@ function TradePage() {
               </CollapsibleTrigger>
               <CollapsibleContent className="p-3">
                 <Tabs defaultValue="manual" className="w-full">
-                  <TabsList className="grid w-full grid-cols-2">
+                  <TabsList className="grid w-full grid-cols-3">
                     <TabsTrigger value="manual">Manual</TabsTrigger>
-                    <TabsTrigger value="auto">Auto</TabsTrigger>
+                    <TabsTrigger value="auto">
+                      Auto
+                      {autoTrade.isRunning && (
+                        <span className="ml-1.5 inline-block h-2 w-2 animate-pulse rounded-full bg-primary" />
+                      )}
+                    </TabsTrigger>
+                    <TabsTrigger value="ai">
+                      <Brain className="h-3.5 w-3.5 mr-1" />
+                      AI
+                      {aiDecision && (
+                        <span className="ml-1.5 inline-block h-2 w-2 rounded-full bg-primary" />
+                      )}
+                    </TabsTrigger>
                   </TabsList>
                   <TabsContent value="manual" className="pt-3">
                     <TradeControls />
                   </TabsContent>
                   <TabsContent value="auto" className="pt-3">
                     <AutoTradeControls />
+                  </TabsContent>
+                  <TabsContent value="ai" className="pt-3">
+                    <AIControls />
                   </TabsContent>
                 </Tabs>
               </CollapsibleContent>
@@ -135,12 +153,19 @@ function TradePage() {
           {/* Desktop layout */}
           <div className="hidden md:block">
             <Tabs defaultValue="manual" className="w-full">
-              <TabsList className="grid w-full grid-cols-2">
+              <TabsList className="grid w-full grid-cols-3">
                 <TabsTrigger value="manual">Manual</TabsTrigger>
                 <TabsTrigger value="auto">
                   Auto
-                  {useApp((s) => s.autoTrade.isRunning) && (
+                  {autoTrade.isRunning && (
                     <span className="ml-1.5 inline-block h-2 w-2 animate-pulse rounded-full bg-primary" />
+                  )}
+                </TabsTrigger>
+                <TabsTrigger value="ai">
+                  <Brain className="h-3.5 w-3.5 mr-1" />
+                  AI
+                  {aiDecision && (
+                    <span className="ml-1.5 inline-block h-2 w-2 rounded-full bg-primary" />
                   )}
                 </TabsTrigger>
               </TabsList>
@@ -149,6 +174,9 @@ function TradePage() {
               </TabsContent>
               <TabsContent value="auto" className="pt-3">
                 <AutoTradeControls />
+              </TabsContent>
+              <TabsContent value="ai" className="pt-3">
+                <AIControls />
               </TabsContent>
             </Tabs>
             <div className="mt-3 border-t border-border pt-3">
