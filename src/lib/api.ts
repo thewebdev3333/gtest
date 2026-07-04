@@ -35,6 +35,18 @@ export function removeToken() {
   sessionStorage.removeItem('gwave_token')
 }
 
+// ✅ NEW: typed error that carries the backend's error code and HTTP status
+export class ApiError extends Error {
+  code?: string
+  status: number
+  constructor(message: string, status: number, code?: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+  }
+}
+
 export async function apiFetch<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -61,7 +73,8 @@ export async function apiFetch<T>(
       removeToken()
       window.location.href = '/login'
     }
-    throw new Error(data.error || data.message || 'API request failed')
+    // ✅ CHANGED: throw ApiError with status + code instead of a plain Error
+    throw new ApiError(data.error || data.message || 'API request failed', response.status, data.code)
   }
 
   return data
@@ -324,16 +337,19 @@ export interface PayoutPreviewResponse {
   data: { potentialPayout: number }
 }
 
+// ✅ FIX: Extended signature to pass direction/selectedDigit for edge-case multipliers
 export async function getPayoutPreview(
   contractType: string,
   stake: number,
   direction?: string,
   selectedDigit?: number
 ): Promise<PayoutPreviewResponse> {
-  let url = `/trade/payout-preview?contractType=${contractType}&stake=${stake}`
-  if (direction) url += `&direction=${direction}`
-  if (selectedDigit !== undefined) url += `&selectedDigit=${selectedDigit}`
-  return apiFetch<PayoutPreviewResponse>(url)
+  const params = new URLSearchParams({ contractType, stake: String(stake) })
+  if (direction) params.append('direction', direction)
+  if (selectedDigit !== undefined && selectedDigit !== null) {
+    params.append('selectedDigit', String(selectedDigit))
+  }
+  return apiFetch<PayoutPreviewResponse>(`/trade/payout-preview?${params.toString()}`)
 }
 
 export interface PlaceTradeRequest {
@@ -405,7 +421,7 @@ export async function getPosition(id: string): Promise<{
   return apiFetch(`/positions/${id}`)
 }
 
-// ── ✅ NEW: Settle Trade API ─────────────────────────────────────
+// ── Settle Trade API ─────────────────────────────────────────────
 
 export interface SettleTradeResponse {
   success: true

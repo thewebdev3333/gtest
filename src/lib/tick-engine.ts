@@ -3,15 +3,22 @@ import { useEffect } from "react";
 import { toast } from "sonner";
 import { useApp, VOLATILITIES } from "./store";
 
+// ✅ NEW: tracks trade IDs currently being settled, to prevent duplicate
+// concurrent settlement calls from the 250ms and 1000ms polling loops.
+const settlingIds = new Set<string>();
+
 function settleAndNotify(id: string, exitPrice: number) {
   const before = useApp.getState().trades.find((x) => x.id === id);
   if (!before || before.status !== "open") return;
-  
-  // ✅ Handle async settlement properly
+
+  // ✅ NEW: bail if a settlement request for this trade is already in flight
+  if (settlingIds.has(id)) return;
+  settlingIds.add(id);
+
   useApp.getState().settleTrade(id, exitPrice).then((updatedTrade) => {
     if (!updatedTrade) return;
     if (updatedTrade.status === "open") return;
-    
+
     const won = updatedTrade.status === "won";
     const pnl = updatedTrade.pnl ?? 0;
     const sign = pnl >= 0 ? "+" : "";
@@ -21,6 +28,9 @@ function settleAndNotify(id: string, exitPrice: number) {
   }).catch((err) => {
     console.error('[settleAndNotify] Failed to settle trade:', err);
     toast.error('Failed to settle trade. Please refresh.');
+  }).finally(() => {
+    // ✅ NEW: always release the lock, success or failure
+    settlingIds.delete(id);
   });
 }
 
@@ -40,7 +50,7 @@ export function useTickEngine() {
   const trades = useApp((s) => s.trades);
   const isConnected = useApp((s) => s.isConnected);
 
-  // ✅ Price engine: fallback to synthetic if WebSocket is not connected
+  // Price engine: fallback to synthetic if WebSocket is not connected
   useEffect(() => {
     // If WebSocket is connected, let it drive prices
     if (isConnected) {
@@ -69,7 +79,7 @@ export function useTickEngine() {
     return () => window.clearInterval(id);
   }, [volatility, isConnected, setPrice]);
 
-  // ✅ Settlement poll — ALWAYS runs as a safety net
+  // Settlement poll — ALWAYS runs as a safety net
   useEffect(() => {
     const id = window.setInterval(() => {
       const now = Date.now();

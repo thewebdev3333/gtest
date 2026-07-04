@@ -19,7 +19,9 @@ import {
   setToken,
   removeToken,
   mapSymbolToBackend,
+  mapSymbolToFrontend,
   settleTrade,
+  ApiError,
   type Position,
   type Transaction,
   type WithdrawalRequest,
@@ -322,7 +324,6 @@ export const useApp = create<AppState>((set, get) => {
     trades: [],
     setTrades: (trades) => set({ trades }),
 
-    // ✅ FIX: openTrade now accepts a real contract ID
     openTrade: (t, realId?: string) => {
       const entryAt = t.entryAt ?? Date.now();
       const trade: Trade = {
@@ -341,23 +342,22 @@ export const useApp = create<AppState>((set, get) => {
       return trade;
     },
 
-    // ✅ FIX: settleTrade with backend call and proper fallback
+    // ✅ FIXED: settleTrade with proper error handling
     settleTrade: async (id, exitPrice) => {
       const t = get().trades.find((x) => x.id === id);
       if (!t || t.status !== "open") return;
 
-      // ── Try backend first ──────────────────────────────────────────
       try {
         const accountType = get().account;
         const response = await settleTrade(id, exitPrice, accountType);
-        
+
         if (response.success) {
           const { outcome, pnl, newBalance } = response.data;
           const won = outcome === 'win';
           const balKey = get().account === "demo" ? "demoBalance" : "realBalance";
-          
+
           const updatedTrade: Trade = { ...t, status: won ? "won" : "lost", exitPrice, pnl };
-          
+
           set((s) => ({
             trades: s.trades.map((x) => (x.id === id ? updatedTrade : x)),
             [balKey]: newBalance,
@@ -368,63 +368,63 @@ export const useApp = create<AppState>((set, get) => {
           if (autoTrade.isRunning) {
             get().handleAutoTradeSettlement(updatedTrade);
           }
-          
+
           return updatedTrade;
         }
       } catch (err) {
-        console.warn('[settleTrade] Backend not available, using local fallback:', err);
-        
-        // ── ✅ FALLBACK: Use local simulation ──────────────────────────
+        // ✅ NEW: distinguish "backend already handled this" from "backend is unreachable"
+        if (err instanceof ApiError) {
+          if (err.code === 'INVALID_STATE' || err.code === 'NOT_FOUND' || err.code === 'FORBIDDEN') {
+            // Contract was already settled (most likely by the backend's own
+            // tick-engine, or by a duplicate call). Do NOT re-simulate or
+            // re-credit — the WS `contract_settled` event / next syncTrades()
+            // call will reconcile local state with the true outcome.
+            console.warn(`[settleTrade] Skipping local fallback for ${id}: backend responded ${err.code}.`);
+            return undefined;
+          }
+          // Some other real API error (validation, unexpected 4xx/5xx) — surface it
+          console.error('[settleTrade] Backend rejected settlement:', err);
+          toast.error(err.message || 'Failed to settle trade.');
+          return undefined;
+        }
+
+        // Not an ApiError → genuine connectivity failure (fetch threw, DNS
+        // failure, response wasn't valid JSON, etc). Safe to fall back locally.
+        console.warn('[settleTrade] Backend unreachable, using local fallback:', err);
+
+        // ── FALLBACK: Use local simulation (only reached on real outages now) ──
         let won = false;
-        const lastDigit = Math.floor(exitPrice * 100) % 10;
+        // ✅ FIXED: last digit of integer part, matching backend's resolveOutcome
+        const lastDigit = Math.floor(exitPrice) % 10;
         switch (t.direction) {
-          case "rise":
-            won = exitPrice > t.entryPrice;
-            break;
-          case "fall":
-            won = exitPrice < t.entryPrice;
-            break;
-          case "over":
-            won = lastDigit > (t.barrier ?? 5);
-            break;
-          case "under":
-            won = lastDigit < (t.barrier ?? 5);
-            break;
-          case "match":
-            won = lastDigit === (t.barrier ?? 0);
-            break;
-          case "differ":
-            won = lastDigit !== (t.barrier ?? 0);
-            break;
-          case "even":
-            won = lastDigit % 2 === 0;
-            break;
-          case "odd":
-            won = lastDigit % 2 === 1;
-            break;
+          case "rise": won = exitPrice > t.entryPrice; break;
+          case "fall": won = exitPrice < t.entryPrice; break;
+          case "over": won = lastDigit > (t.barrier ?? 5); break;
+          case "under": won = lastDigit < (t.barrier ?? 5); break;
+          case "match": won = lastDigit === (t.barrier ?? 0); break;
+          case "differ": won = lastDigit !== (t.barrier ?? 0); break;
+          case "even": won = lastDigit % 2 === 0; break;
+          case "odd": won = lastDigit % 2 === 1; break;
         }
 
         const pnl = won ? t.payout - t.stake : -t.stake;
         const credit = won ? t.payout : 0;
         const balKey = get().account === "demo" ? "demoBalance" : "realBalance";
-        
+
         const updatedTrade: Trade = { ...t, status: won ? "won" : "lost", exitPrice, pnl };
-        
+
         set((s) => ({
           trades: s.trades.map((x) => (x.id === id ? updatedTrade : x)),
           [balKey]: (s[balKey] as number) + credit,
         }) as Partial<AppState>);
         savePrefs(get());
 
-        // Still trigger auto trade settlement with the local data
         const autoTrade = get().autoTrade;
         if (autoTrade.isRunning) {
           get().handleAutoTradeSettlement(updatedTrade);
         }
-        
-        // Show a different toast message
+
         toast.info('Trade settled locally (backend not available)');
-        
         return updatedTrade;
       }
     },
@@ -611,7 +611,7 @@ export const useApp = create<AppState>((set, get) => {
         return;
       }
       
-      // ── ✅ CALL THE REAL BACKEND API ──────────────────────────────────
+      // ── CALL THE REAL BACKEND API ──────────────────────────────────
       const payout = autoTrade.stake * PAYOUT_MULTIPLIER[autoTrade.contract];
       const durationTicks = Math.max(2, Math.round(autoTrade.durationMs / 1000));
       
@@ -631,7 +631,7 @@ export const useApp = create<AppState>((set, get) => {
           
           const contractId = response.data.contractId;
           
-          // ✅ Add to local trades list with the REAL contract ID
+          // Add to local trades list with the REAL contract ID
           const trade: Trade = {
             id: contractId,
             contract: autoTrade.contract,
@@ -840,6 +840,7 @@ export const useApp = create<AppState>((set, get) => {
       }
     },
 
+    // ✅ FIXED: syncTrades now converts backend symbol to frontend format
     syncTrades: async () => {
       try {
         const accountType = get().account;
@@ -849,7 +850,7 @@ export const useApp = create<AppState>((set, get) => {
             id: p.id,
             contract: p.contract_type as any,
             direction: p.direction as any,
-            volatility: p.symbol as any,
+            volatility: mapSymbolToFrontend(p.symbol) as any, // ✅ CHANGED
             stake: parseFloat(p.stake),
             payout: parseFloat(p.potential_payout),
             durationMs: p.duration_ticks * 1000,
@@ -896,11 +897,11 @@ export const useApp = create<AppState>((set, get) => {
       wsInstance.on('contract_settled', (data) => {
         console.log('[WS] Contract settled:', data);
         
-        // ✅ Sync trades and balances from the backend
+        // Sync trades and balances from the backend
         get().syncTrades();
         get().fetchBalances();
         
-        // ✅ If auto trade is running, check if this is our auto trade contract
+        // If auto trade is running, check if this is our auto trade contract
         const autoTrade = get().autoTrade;
         if (autoTrade.isRunning && data.contractId === autoTrade.currentContractId) {
           // Find the trade in our local list
