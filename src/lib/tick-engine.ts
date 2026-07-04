@@ -3,15 +3,21 @@ import { useEffect } from "react";
 import { toast } from "sonner";
 import { useApp, VOLATILITIES } from "./store";
 
-// ✅ NEW: tracks trade IDs currently being settled, to prevent duplicate
+// Tracks trade IDs currently being settled, to prevent duplicate
 // concurrent settlement calls from the 250ms and 1000ms polling loops.
 const settlingIds = new Set<string>();
+
+// ✅ NEW: how long to wait, past expiry, for the backend's own
+// WS-pushed settlement before falling back to an explicit REST call.
+// Keeps the common case (connected, WS delivers on time) fast and
+// single-path, while still guaranteeing settlement if a WS message
+// is ever missed.
+const GRACE_MS = 3000;
 
 function settleAndNotify(id: string, exitPrice: number) {
   const before = useApp.getState().trades.find((x) => x.id === id);
   if (!before || before.status !== "open") return;
 
-  // ✅ NEW: bail if a settlement request for this trade is already in flight
   if (settlingIds.has(id)) return;
   settlingIds.add(id);
 
@@ -29,7 +35,6 @@ function settleAndNotify(id: string, exitPrice: number) {
     console.error('[settleAndNotify] Failed to settle trade:', err);
     toast.error('Failed to settle trade. Please refresh.');
   }).finally(() => {
-    // ✅ NEW: always release the lock, success or failure
     settlingIds.delete(id);
   });
 }
@@ -52,7 +57,6 @@ export function useTickEngine() {
 
   // Price engine: fallback to synthetic if WebSocket is not connected
   useEffect(() => {
-    // If WebSocket is connected, let it drive prices
     if (isConnected) {
       console.log('[TickEngine] WebSocket connected — using real data');
       return;
@@ -63,15 +67,15 @@ export function useTickEngine() {
     const vol = VOLATILITIES.find((v) => v.id === volatility)?.vol ?? 1;
     const id = window.setInterval(() => {
       const cur = useApp.getState().price;
-      const drift = -0.0001 * (cur - 200); // mean reversion ~200
+      const drift = -0.0001 * (cur - 200);
       const change = gauss() * 0.15 * vol + drift;
       const next = Math.max(50, cur + change);
       setPrice(Number(next.toFixed(3)));
 
-      // settle expired
       const now = Date.now();
       for (const t of useApp.getState().trades) {
         if (t.status === "open" && now >= t.expiresAt) {
+          // Disconnected → no WS push coming, settle immediately
           settleAndNotify(t.id, useApp.getState().price);
         }
       }
@@ -83,8 +87,16 @@ export function useTickEngine() {
   useEffect(() => {
     const id = window.setInterval(() => {
       const now = Date.now();
+      const connected = useApp.getState().isConnected;
       for (const t of useApp.getState().trades) {
-        if (t.status === "open" && now >= t.expiresAt) {
+        if (t.status !== "open") continue;
+        const overdue = now >= t.expiresAt;
+        if (!overdue) continue;
+
+        // ✅ CHANGED: when connected, give the backend's proactive WS push a
+        // grace window to arrive before we issue our own REST settle call.
+        // When disconnected, there's no WS push coming — settle immediately.
+        if (!connected || now >= t.expiresAt + GRACE_MS) {
           settleAndNotify(t.id, useApp.getState().price);
         }
       }

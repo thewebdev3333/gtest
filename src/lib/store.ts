@@ -238,6 +238,9 @@ const initialAutoTradeResult = {
   result: null,
 };
 
+// ✅ NEW: module-level guard to prevent double-settlement for auto-trade contracts
+const autoSettledContractIds = new Set<string>();
+
 export const useApp = create<AppState>((set, get) => {
   const prefs = loadPrefs();
   const auth = loadAuth();
@@ -342,7 +345,6 @@ export const useApp = create<AppState>((set, get) => {
       return trade;
     },
 
-    // ✅ FIXED: settleTrade with proper error handling
     settleTrade: async (id, exitPrice) => {
       const t = get().trades.find((x) => x.id === id);
       if (!t || t.status !== "open") return;
@@ -364,37 +366,34 @@ export const useApp = create<AppState>((set, get) => {
           }) as Partial<AppState>);
           savePrefs(get());
 
+          // ✅ CHANGED: only the tracked auto-trade contract, and only once
           const autoTrade = get().autoTrade;
-          if (autoTrade.isRunning) {
+          if (
+            autoTrade.isRunning &&
+            updatedTrade.id === autoTrade.currentContractId &&
+            !autoSettledContractIds.has(updatedTrade.id)
+          ) {
+            autoSettledContractIds.add(updatedTrade.id);
             get().handleAutoTradeSettlement(updatedTrade);
           }
 
           return updatedTrade;
         }
       } catch (err) {
-        // ✅ NEW: distinguish "backend already handled this" from "backend is unreachable"
         if (err instanceof ApiError) {
           if (err.code === 'INVALID_STATE' || err.code === 'NOT_FOUND' || err.code === 'FORBIDDEN') {
-            // Contract was already settled (most likely by the backend's own
-            // tick-engine, or by a duplicate call). Do NOT re-simulate or
-            // re-credit — the WS `contract_settled` event / next syncTrades()
-            // call will reconcile local state with the true outcome.
             console.warn(`[settleTrade] Skipping local fallback for ${id}: backend responded ${err.code}.`);
             return undefined;
           }
-          // Some other real API error (validation, unexpected 4xx/5xx) — surface it
           console.error('[settleTrade] Backend rejected settlement:', err);
           toast.error(err.message || 'Failed to settle trade.');
           return undefined;
         }
 
-        // Not an ApiError → genuine connectivity failure (fetch threw, DNS
-        // failure, response wasn't valid JSON, etc). Safe to fall back locally.
         console.warn('[settleTrade] Backend unreachable, using local fallback:', err);
 
-        // ── FALLBACK: Use local simulation (only reached on real outages now) ──
+        // ── FALLBACK: Use local simulation ──────────────────────────
         let won = false;
-        // ✅ FIXED: last digit of integer part, matching backend's resolveOutcome
         const lastDigit = Math.floor(exitPrice) % 10;
         switch (t.direction) {
           case "rise": won = exitPrice > t.entryPrice; break;
@@ -420,7 +419,12 @@ export const useApp = create<AppState>((set, get) => {
         savePrefs(get());
 
         const autoTrade = get().autoTrade;
-        if (autoTrade.isRunning) {
+        if (
+          autoTrade.isRunning &&
+          updatedTrade.id === autoTrade.currentContractId &&
+          !autoSettledContractIds.has(updatedTrade.id)
+        ) {
+          autoSettledContractIds.add(updatedTrade.id);
           get().handleAutoTradeSettlement(updatedTrade);
         }
 
@@ -840,28 +844,50 @@ export const useApp = create<AppState>((set, get) => {
       }
     },
 
-    // ✅ FIXED: syncTrades now converts backend symbol to frontend format
+    // ✅ FIXED: syncTrades now merges instead of replacing
     syncTrades: async () => {
       try {
         const accountType = get().account;
         const response = await getOpenPositions(accountType);
         if (response.success) {
-          const trades = response.data.positions.map((p: Position) => ({
+          const openTrades: Trade[] = response.data.positions.map((p: Position) => ({
             id: p.id,
             contract: p.contract_type as any,
             direction: p.direction as any,
-            volatility: mapSymbolToFrontend(p.symbol) as any, // ✅ CHANGED
+            volatility: mapSymbolToFrontend(p.symbol) as any,
             stake: parseFloat(p.stake),
             payout: parseFloat(p.potential_payout),
             durationMs: p.duration_ticks * 1000,
             entryPrice: parseFloat(p.entry_price),
             entryAt: new Date(p.created_at).getTime(),
             expiresAt: new Date(p.created_at).getTime() + (p.duration_ticks * 1000),
-            status: (p.status === 'open' ? 'open' : p.outcome === 'win' ? 'won' : 'lost') as 'open' | 'won' | 'lost',
+            status: 'open',
             exitPrice: undefined,
             pnl: undefined,
           }));
-          set({ trades });
+
+          const openIds = new Set(openTrades.map((t) => t.id));
+
+          set((s) => {
+            // ✅ CHANGED: keep every local trade that's already settled
+            // (won/lost) — those carry real exitPrice/pnl from settleTrade or
+            // the WS handler and must not be discarded just because the
+            // "open positions" endpoint no longer lists them.
+            const alreadySettledLocally = s.trades.filter((t) => t.status !== 'open');
+
+            // Any local trade still marked "open" that the backend no longer
+            // considers open, but that we never received a settlement event
+            // for (e.g. missed WS message): keep it as-is rather than silently
+            // dropping it. It'll get corrected next time an explicit settle
+            // or WS event for it arrives.
+            const staleOpenNotYetReconciled = s.trades.filter(
+              (t) => t.status === 'open' && !openIds.has(t.id)
+            );
+
+            return {
+              trades: [...openTrades, ...alreadySettledLocally, ...staleOpenNotYetReconciled],
+            };
+          });
         }
       } catch (err) {
         console.error('Failed to sync trades:', err);
@@ -896,31 +922,31 @@ export const useApp = create<AppState>((set, get) => {
       
       wsInstance.on('contract_settled', (data) => {
         console.log('[WS] Contract settled:', data);
-        
-        // Sync trades and balances from the backend
+
+        // ✅ Still sync, but now it merges instead of replacing
         get().syncTrades();
         get().fetchBalances();
-        
-        // If auto trade is running, check if this is our auto trade contract
+
         const autoTrade = get().autoTrade;
-        if (autoTrade.isRunning && data.contractId === autoTrade.currentContractId) {
-          // Find the trade in our local list
+        if (
+          autoTrade.isRunning &&
+          data.contractId === autoTrade.currentContractId &&
+          !autoSettledContractIds.has(data.contractId)
+        ) {
           const trade = get().trades.find(t => t.id === data.contractId);
           if (trade && trade.status === 'open') {
-            // Update the trade with the settlement data
             const updatedTrade: Trade = {
               ...trade,
               status: data.outcome === 'win' ? 'won' : 'lost',
               exitPrice: data.exitPrice,
               pnl: data.pnl,
             };
-            
-            // Update trades list
+
             set((s) => ({
               trades: s.trades.map((t) => t.id === data.contractId ? updatedTrade : t),
             }));
-            
-            // Let auto trade handle the settlement
+
+            autoSettledContractIds.add(data.contractId);
             get().handleAutoTradeSettlement(updatedTrade);
           }
         }
