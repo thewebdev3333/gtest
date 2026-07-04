@@ -3,49 +3,43 @@ import { useEffect } from "react";
 import { toast } from "sonner";
 import { useApp, VOLATILITIES } from "./store";
 
+// Tracks trade IDs currently being settled, to prevent duplicate
+// concurrent settlement calls from the 250ms and 1000ms polling loops.
 const settlingIds = new Set<string>();
+
+// ✅ NEW: how long to wait, past expiry, for the backend's own
+// WS-pushed settlement before falling back to an explicit REST call.
+// Keeps the common case (connected, WS delivers on time) fast and
+// single-path, while still guaranteeing settlement if a WS message
+// is ever missed.
 const GRACE_MS = 3000;
 
 function settleAndNotify(id: string, exitPrice: number) {
   const before = useApp.getState().trades.find((x) => x.id === id);
-  if (!before || before.status !== "open") {
-    console.log(`[TickEngine] Trade ${id} not open or not found, skipping settlement`);
-    return;
-  }
+  if (!before || before.status !== "open") return;
 
-  if (settlingIds.has(id)) {
-    console.log(`[TickEngine] Trade ${id} already being settled, skipping duplicate`);
-    return;
-  }
-  
-  console.log(`[TickEngine] Settling trade ${id} at exit price ${exitPrice}`);
+  if (settlingIds.has(id)) return;
   settlingIds.add(id);
 
   useApp.getState().settleTrade(id, exitPrice).then((updatedTrade) => {
-    if (!updatedTrade) {
-      console.log(`[TickEngine] Trade ${id} settlement returned no updated trade`);
-      return;
-    }
-    if (updatedTrade.status === "open") {
-      console.log(`[TickEngine] Trade ${id} still open after settlement attempt`);
-      return;
-    }
+    if (!updatedTrade) return;
+    if (updatedTrade.status === "open") return;
 
     const won = updatedTrade.status === "won";
     const pnl = updatedTrade.pnl ?? 0;
     const sign = pnl >= 0 ? "+" : "";
     const msg = `${updatedTrade.direction.toUpperCase()} ${won ? "won" : "lost"} · ${sign}$${pnl.toFixed(2)}`;
-    console.log(`[TickEngine] Trade ${id} settled: ${msg}`);
     if (won) toast.success(msg, { description: `Exit @ ${exitPrice.toFixed(3)}` });
     else toast.error(msg, { description: `Exit @ ${exitPrice.toFixed(3)}` });
   }).catch((err) => {
-    console.error(`[TickEngine] Failed to settle trade ${id}:`, err);
+    console.error('[settleAndNotify] Failed to settle trade:', err);
     toast.error('Failed to settle trade. Please refresh.');
   }).finally(() => {
     settlingIds.delete(id);
   });
 }
 
+// Box-Muller gaussian
 function gauss() {
   let u = 0;
   let v = 0;
@@ -54,6 +48,7 @@ function gauss() {
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
 
+/** Global tick engine: emits ticks, settles expired trades. */
 export function useTickEngine() {
   const setPrice = useApp((s) => s.setPrice);
   const volatility = useApp((s) => s.volatility);
@@ -80,7 +75,7 @@ export function useTickEngine() {
       const now = Date.now();
       for (const t of useApp.getState().trades) {
         if (t.status === "open" && now >= t.expiresAt) {
-          console.log(`[TickEngine] Synthetic engine: trade ${t.id} expired at ${t.expiresAt}, settling`);
+          // Disconnected → no WS push coming, settle immediately
           settleAndNotify(t.id, useApp.getState().price);
         }
       }
@@ -98,13 +93,11 @@ export function useTickEngine() {
         const overdue = now >= t.expiresAt;
         if (!overdue) continue;
 
-        const age = now - t.expiresAt;
-        if (!connected || age >= GRACE_MS) {
-          console.log(`[TickEngine] Poll: trade ${t.id} expired ${age}ms ago, settling`);
+        // ✅ CHANGED: when connected, give the backend's proactive WS push a
+        // grace window to arrive before we issue our own REST settle call.
+        // When disconnected, there's no WS push coming — settle immediately.
+        if (!connected || now >= t.expiresAt + GRACE_MS) {
           settleAndNotify(t.id, useApp.getState().price);
-        } else {
-          // Waiting for WS push
-          // console.log(`[TickEngine] Poll: trade ${t.id} expired ${age}ms ago, waiting for WS (${GRACE_MS - age}ms remaining)`);
         }
       }
     }, 250);
