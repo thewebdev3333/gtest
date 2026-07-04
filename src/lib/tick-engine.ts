@@ -38,18 +38,17 @@ export function useTickEngine() {
   const setPrice = useApp((s) => s.setPrice);
   const volatility = useApp((s) => s.volatility);
   const trades = useApp((s) => s.trades);
-  const isAuthenticated = useApp((s) => s.isAuthenticated);
+  const isConnected = useApp((s) => s.isConnected);
 
-  // ✅ Only run demo engine if NOT authenticated (demo mode only)
+  // ✅ Price engine: fallback to synthetic if WebSocket is not connected
   useEffect(() => {
-    // If user is authenticated, they should use real WebSocket data
-    // The demo engine is only for non-logged-in users on the /demo route
-    if (isAuthenticated) {
-      console.log('[TickEngine] Authenticated — using WebSocket data, demo engine disabled');
+    // If WebSocket is connected, let it drive prices
+    if (isConnected) {
+      console.log('[TickEngine] WebSocket connected — using real data');
       return;
     }
 
-    console.log('[TickEngine] Demo mode — using synthetic price engine');
+    console.log('[TickEngine] WebSocket disconnected — using synthetic price engine');
     
     const vol = VOLATILITIES.find((v) => v.id === volatility)?.vol ?? 1;
     const id = window.setInterval(() => {
@@ -68,16 +67,10 @@ export function useTickEngine() {
       }
     }, 1000);
     return () => window.clearInterval(id);
-  }, [volatility, isAuthenticated, setPrice]);
+  }, [volatility, isConnected, setPrice]);
 
-  // ✅ Settlement poll — only run for demo mode, and check trades properly
+  // ✅ Settlement poll — ALWAYS runs as a safety net
   useEffect(() => {
-    if (isAuthenticated) {
-      console.log('[TickEngine] Settlement poll disabled for authenticated users');
-      return;
-    }
-
-    console.log('[TickEngine] Settlement poll active for demo mode');
     const id = window.setInterval(() => {
       const now = Date.now();
       for (const t of useApp.getState().trades) {
@@ -87,5 +80,5 @@ export function useTickEngine() {
       }
     }, 250);
     return () => window.clearInterval(id);
-  }, [trades.length, isAuthenticated]);
+  }, [trades.length]);
 }

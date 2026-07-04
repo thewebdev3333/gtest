@@ -322,11 +322,12 @@ export const useApp = create<AppState>((set, get) => {
     trades: [],
     setTrades: (trades) => set({ trades }),
 
-    openTrade: (t) => {
+    // ✅ FIX: openTrade now accepts a real contract ID
+    openTrade: (t, realId?: string) => {
       const entryAt = t.entryAt ?? Date.now();
       const trade: Trade = {
         ...t,
-        id: Math.random().toString(36).slice(2),
+        id: realId || Math.random().toString(36).slice(2),
         status: "open",
         entryAt,
         expiresAt: entryAt + t.durationMs,
@@ -340,7 +341,7 @@ export const useApp = create<AppState>((set, get) => {
       return trade;
     },
 
-    // ✅ FIXED: settleTrade with backend call and fallback
+    // ✅ FIX: settleTrade with backend call and proper fallback
     settleTrade: async (id, exitPrice) => {
       const t = get().trades.find((x) => x.id === id);
       if (!t || t.status !== "open") return;
@@ -630,7 +631,7 @@ export const useApp = create<AppState>((set, get) => {
           
           const contractId = response.data.contractId;
           
-          // Add to local trades list for UI display
+          // ✅ Add to local trades list with the REAL contract ID
           const trade: Trade = {
             id: contractId,
             contract: autoTrade.contract,
