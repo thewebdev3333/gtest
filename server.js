@@ -49,7 +49,7 @@ app.get('/trade/symbols', (req, res) => {
 })
 
 app.get('/trade/payout-preview', (req, res) => {
-  const { contractType, stake } = req.query
+  const { contractType, stake, direction, selectedDigit } = req.query
   if (!contractType || !stake) {
     return res.status(400).json({ 
       success: false, 
@@ -57,7 +57,7 @@ app.get('/trade/payout-preview', (req, res) => {
       code: 'VALIDATION_ERROR' 
     })
   }
-  const payout = market.calculatePayout(contractType, parseFloat(stake))
+  const payout = market.calculatePayout(contractType, parseFloat(stake), direction, selectedDigit ? parseInt(selectedDigit) : null)
   res.json({ success: true, data: { potentialPayout: payout } })
 })
 
@@ -87,7 +87,7 @@ app.post('/trade/place',
         })
       }
 
-      const potentialPayout = market.calculatePayout(contractType, stake)
+      const potentialPayout = market.calculatePayout(contractType, stake, direction, selectedDigit)
 
       await db.deductBalance(account.id, stake)
       await db.createTransaction({ 
@@ -130,6 +130,100 @@ app.post('/trade/place',
         })
       }
       next(err)
+    }
+  }
+)
+
+// ── ✅ NEW: Trade Settlement Endpoint ─────────────────────────────
+
+app.post('/trade/settle/:contractId',
+  mw.authenticate,
+  async (req, res, next) => {
+    try {
+      const { contractId } = req.params
+      const { exitPrice, accountType } = req.body
+
+      // Get the contract
+      const contract = await db.getContractById(contractId)
+      if (!contract) {
+        return res.status(404).json({ 
+          success: false, 
+          error: 'Contract not found.', 
+          code: 'NOT_FOUND' 
+        })
+      }
+
+      // Verify ownership
+      if (contract.user_id !== req.user.id) {
+        return res.status(403).json({ 
+          success: false, 
+          error: 'Access denied.', 
+          code: 'FORBIDDEN' 
+        })
+      }
+
+      // Check if already settled
+      if (contract.status !== 'open') {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Contract already settled.', 
+          code: 'INVALID_STATE' 
+        })
+      }
+
+      // Resolve outcome
+      const outcome = market.resolveOutcome(contract, exitPrice)
+      const payout = outcome === 'win' ? parseFloat(contract.potential_payout) : 0
+      const pnl = payout - parseFloat(contract.stake)
+
+      // Get the account
+      const account = await db.getAccountByUserAndType(req.user.id, accountType)
+      if (!account) {
+        return res.status(404).json({ 
+          success: false, 
+          error: 'Account not found.', 
+          code: 'NOT_FOUND' 
+        })
+      }
+
+      // Update balance in database
+      if (outcome === 'win') {
+        await db.addBalance(account.id, payout)
+        console.log(`[Settle] User ${req.user.id} won ${payout} on contract ${contractId}`)
+      } else {
+        console.log(`[Settle] User ${req.user.id} lost on contract ${contractId}`)
+      }
+
+      // Mark contract as settled
+      await db.settleContract(contract.id, {
+        exitPrice,
+        outcome,
+        settledAt: new Date().toISOString(),
+      })
+
+      // Create transaction record
+      await db.createTransaction({
+        user_id: req.user.id,
+        type: outcome === 'win' ? 'trade_win' : 'trade_loss',
+        amount_usd: outcome === 'win' ? payout : parseFloat(contract.stake),
+        status: 'completed',
+      })
+
+      // Get updated balance
+      const updatedAccount = await db.getAccountByUserAndType(req.user.id, accountType)
+
+      res.json({
+        success: true,
+        data: {
+          contractId: contract.id,
+          outcome,
+          pnl,
+          newBalance: parseFloat(updatedAccount.balance),
+        },
+      })
+    } catch (err) { 
+      console.error('[Settle] Error:', err)
+      next(err) 
     }
   }
 )
@@ -324,36 +418,16 @@ const wss = new WebSocketServer({
   path: '/ws'
 })
 
-// Store user ID on WebSocket connection for broadcasting
 wss.on('connection', (ws, req) => {
-  const url = new URL(req.url, 'http://localhost')
-  const token = url.searchParams.get('token')
-  
-  if (token) {
-    try {
-      const jwt = require('jsonwebtoken')
-      const payload = jwt.verify(token, process.env.SUPABASE_JWT_SECRET)
-      ws.userId = payload.sub
-    } catch {
-      // Invalid token - connection still allowed for public tick stream
-    }
-  }
-  
   market.handleWsConnection(ws, req)
 })
-
-// Set WebSocket server reference in wallet module for broadcasting
-// wallet.setWebSocketServer(wss)
 
 // ── Boot sequence ──────────────────────────────────────────────────
 
 async function start() {
   console.log('[G Wave] Starting engine...')
   
-  // Start exchange rate updater
   exchange.startExchangeRateUpdater()
-  
-  // Start market engine
   market.startEngine()
   console.log('[G Wave] Market engine started')
 
@@ -365,17 +439,10 @@ async function start() {
   })
 }
 
-app.get('/wallet/pending/check', 
-  mw.authenticate, 
-  wallet.checkPendingTransactions
-)
-
 start().catch(err => {
   console.error('[G Wave] Boot failed:', err)
   process.exit(1)
 })
-
-// ── Graceful shutdown ─────────────────────────────────────────────
 
 process.on('SIGTERM', () => {
   console.log('[G Wave] Shutting down...')

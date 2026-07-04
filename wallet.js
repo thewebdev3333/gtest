@@ -1,845 +1,332 @@
-// wallet.js
+// market.js
 const db = require('./database')
-const multer = require('multer')
-const path = require('path')
-const fs = require('fs')
-const crypto = require('crypto')
-const { getKycStatus } = require('./auth')
 
-// Ensure upload directory exists
-const kycUploadPath = process.env.KYC_UPLOAD_PATH || './uploads/kyc'
-if (!fs.existsSync(kycUploadPath)) {
-  fs.mkdirSync(kycUploadPath, { recursive: true })
+const SYMBOLS = {
+  V20_1S: {
+    id: 'V20_1S',
+    label: 'Volatility 20 (1s) Index',
+    sigma: 0.0002,
+    tickIntervalMs: 1000,
+    startPrice: 5000,
+  },
+  V50_1S: {
+    id: 'V50_1S',
+    label: 'Volatility 50 (1s) Index',
+    sigma: 0.0008,
+    tickIntervalMs: 1000,
+    startPrice: 8000,
+  },
+  V100_1S: {
+    id: 'V100_1S',
+    label: 'Volatility 100 (1s) Index',
+    sigma: 0.002,
+    tickIntervalMs: 1000,
+    startPrice: 10000,
+  },
 }
 
-// ── PalPluss API Configuration ────────────────────────────────────
+const TICK_BUFFER_SIZE = 500
 
-const PALPLUSS_BASE_URL = process.env.PALPLUSS_BASE_URL || 'https://api.palpluss.com/v1'
-const PALPLUSS_API_KEY = process.env.PALPLUSS_API_KEY
-const PALPLUSS_BASIC_AUTH_TOKEN = process.env.PALPLUSS_BASIC_AUTH_TOKEN
-
-function formatPhoneNumber(phone) {
-  let cleaned = phone.replace(/\s/g, '')
-  
-  if (cleaned.startsWith('+')) {
-    cleaned = cleaned.substring(1)
-  }
-  
-  if (cleaned.startsWith('0')) {
-    cleaned = '254' + cleaned.substring(1)
-  }
-  
-  if (cleaned.startsWith('1') && !cleaned.startsWith('2541')) {
-    cleaned = '254' + cleaned
-  }
-  
-  if (cleaned.startsWith('7') && !cleaned.startsWith('2547')) {
-    cleaned = '254' + cleaned
-  }
-  
-  if (!/^254[17]\d{8}$/.test(cleaned)) {
-    return null
-  }
-  
-  return cleaned
+const engineState = {
+  V20_1S: { price: 5000, tickCount: 0, sessionOpen: 5000 },
+  V50_1S: { price: 8000, tickCount: 0, sessionOpen: 8000 },
+  V100_1S: { price: 10000, tickCount: 0, sessionOpen: 10000 },
 }
 
-function getAuthHeader() {
-  if (PALPLUSS_BASIC_AUTH_TOKEN) {
-    return 'Basic ' + PALPLUSS_BASIC_AUTH_TOKEN
-  }
-  
-  if (PALPLUSS_API_KEY) {
-    const credentials = `${PALPLUSS_API_KEY}:`
-    const encoded = Buffer.from(credentials).toString('base64')
-    return 'Basic ' + encoded
-  }
-  
-  return null
+const tickBuffers = {
+  V20_1S: [],
+  V50_1S: [],
+  V100_1S: [],
 }
 
-const HAS_PALPLUSS_CREDENTIALS = !!(PALPLUSS_BASIC_AUTH_TOKEN || PALPLUSS_API_KEY)
+const latestTick = {
+  V20_1S: null,
+  V50_1S: null,
+  V100_1S: null,
+}
 
-console.log(`[PalPluss] Credentials: ${HAS_PALPLUSS_CREDENTIALS ? '✅ Configured' : '⚠️ Mock Mode'}`)
+const subscribers = {
+  V20_1S: new Set(),
+  V50_1S: new Set(),
+  V100_1S: new Set(),
+}
 
-async function palplussRequest(endpoint, method = 'POST', data = null) {
-  const authHeader = getAuthHeader()
+const userConnections = new Map()
+
+// ── Price Generation ──────────────────────────────────────────────
+
+function gaussianRandom() {
+  let u, v
+  do { u = Math.random() } while (u === 0)
+  do { v = Math.random() } while (v === 0)
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v)
+}
+
+function nextPrice(currentPrice, sigma) {
+  const change = currentPrice * sigma * gaussianRandom()
+  return Math.max(0.01, parseFloat((currentPrice + change).toFixed(5)))
+}
+
+// ── Payout Calculation ────────────────────────────────────────────
+
+const PAYOUT_MULTIPLIERS = {
+  rise_fall: 1.88,
+  over_under: 1.88,
+  even_odd: 1.96,
+  match_differ: 8.00,
+}
+
+// ✅ Edge cases for Over/Under (barrier 0 + over, barrier 9 + under)
+const OVER_UNDER_EDGE_MULTIPLIER = 1.19
+
+function calculatePayout(contractType, stake, direction = null, selectedDigit = null) {
+  let multiplier = PAYOUT_MULTIPLIERS[contractType] ?? 1.88
   
-  if (!authHeader) {
-    console.log(`[PalPluss MOCK] ${method} ${endpoint}`, data)
-    return {
-      checkoutRequestId: `mock_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      merchantRequestId: `mock_merchant_${Date.now()}`,
-      status: 'pending',
-      message: 'STK Push sent (MOCK)',
+  // Special case: Over/Under edge barriers
+  if (contractType === 'over_under' && direction && selectedDigit !== null) {
+    const isEdge = (selectedDigit === 0 && direction === 'over') || 
+                   (selectedDigit === 9 && direction === 'under')
+    if (isEdge) {
+      multiplier = OVER_UNDER_EDGE_MULTIPLIER
+      console.log(`[Payout] Edge case detected: ${direction} ${selectedDigit} → multiplier ${multiplier}`)
     }
   }
-
-  const url = `${PALPLUSS_BASE_URL}${endpoint}`
-  console.log(`[PalPluss] Request URL: ${url}`)
   
-  const options = {
-    method,
-    headers: {
-      'Authorization': authHeader,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-    },
-  }
+  return parseFloat((stake * multiplier).toFixed(8))
+}
 
-  if (data) {
-    options.body = JSON.stringify(data)
-  }
+// ── ✅ Outcome Resolution ───────────────────────────────────────────
 
+function resolveOutcome(contract, exitPrice) {
+  const entry = parseFloat(contract.entry_price)
+  const exit = parseFloat(exitPrice)
+  const dir = contract.direction
+
+  switch (contract.contract_type) {
+    case 'rise_fall':
+      return dir === 'rise' ? (exit > entry ? 'win' : 'loss')
+                            : (exit < entry ? 'win' : 'loss')
+
+    case 'over_under': {
+      const selectedDigit = contract.selected_digit ?? 5
+      const lastDigit = Math.floor(exit) % 10
+      return dir === 'over' ? (lastDigit > selectedDigit ? 'win' : 'loss')
+                            : (lastDigit < selectedDigit ? 'win' : 'loss')
+    }
+
+    case 'even_odd': {
+      const lastDigit = Math.floor(exit) % 10
+      return dir === 'even' ? (lastDigit % 2 === 0 ? 'win' : 'loss')
+                            : (lastDigit % 2 !== 0 ? 'win' : 'loss')
+    }
+
+    case 'match_differ': {
+      const selectedDigit = contract.selected_digit ?? 0
+      const exitDigit = Math.floor(exit) % 10
+      return dir === 'match' ? (exitDigit === selectedDigit ? 'win' : 'loss')
+                             : (exitDigit !== selectedDigit ? 'win' : 'loss')
+    }
+
+    default: return 'loss'
+  }
+}
+
+// ── Broadcasting ──────────────────────────────────────────────────
+
+function broadcastTick(symbolId, tick) {
+  const payload = JSON.stringify({ type: 'tick', ...tick })
+  for (const ws of subscribers[symbolId]) {
+    if (ws.readyState === 1) {
+      ws.send(payload)
+    } else {
+      subscribers[symbolId].delete(ws)
+    }
+  }
+}
+
+function notifyUser(userId, message) {
+  const connections = userConnections.get(userId)
+  if (!connections) return
+  const payload = JSON.stringify(message)
+  for (const ws of connections) {
+    if (ws.readyState === 1) ws.send(payload)
+    else connections.delete(ws)
+  }
+}
+
+// ── Contract Settlement ───────────────────────────────────────────
+
+async function settleExpiredContracts(symbolId, currentPrice, currentTick) {
+  let contracts
   try {
-    const response = await fetch(url, options)
-    const result = await response.json()
-
-    if (!result.success) {
-      const error = result.error || { message: 'PalPluss API error', code: 'UNKNOWN_ERROR' }
-      throw new Error(`PalPluss: ${error.message} (${error.code})`)
-    }
-
-    return result.data
-  } catch (error) {
-    console.error('[PalPluss] API Error:', error.message)
-    throw error
-  }
-}
-
-async function initiateStkPush(phone, amountKES, reference, channelId = null) {
-  console.log(`[PalPluss] STK Push to ${phone} for KES ${amountKES}, ref: ${reference}`)
-  
-  const formattedPhone = formatPhoneNumber(phone)
-  if (!formattedPhone) {
-    throw new Error('Invalid phone number format. Use 07XXXXXXXX, 01XXXXXXXX, or 2547XXXXXXXX')
-  }
-  
-  const paymentChannelId = channelId || process.env.PALPLUSS_CHANNEL_ID || 'your-payment-channel-id'
-  
-  const requestData = {
-    amount: amountKES,
-    phone: formattedPhone,
-    accountReference: reference || 'GWave',
-    transactionDesc: `G Wave deposit - ${reference}`,
-    channelId: paymentChannelId,
-    callbackUrl: process.env.PALPLUSS_CALLBACK_URL || 'https://your-ngrok-url.ngrok.io/wallet/palpluss/callback',
-  }
-  
-  console.log('[PalPluss] Request data:', JSON.stringify(requestData, null, 2))
-  
-  const data = await palplussRequest('/payments/stk', 'POST', requestData)
-
-  return { 
-    checkoutRequestId: data.checkoutRequestId || data.merchantRequestId || data.id || data.reference,
-    ...data 
-  }
-}
-
-async function checkPalPlussTransactionStatus(palplussTransactionId) {
-  try {
-    return await palplussRequest(`/transactions/${palplussTransactionId}`, 'GET')
-  } catch (error) {
-    console.error('[PalPluss] Status check failed:', error.message)
-    return null
-  }
-}
-
-// ── Handler Functions ─────────────────────────────────────────────
-
-async function getBalance(req, res, next) {
-  try {
-    const accounts = await db.getAccountsByUserId(req.user.id)
-    const rate = await db.getExchangeRate('USD', 'KES')
-
-    const fmt = (usd) => ({
-      usd: parseFloat(usd || 0).toFixed(2),
-      kes: (parseFloat(usd || 0) * rate).toFixed(2),
-    })
-
-    const demo = accounts.find(a => a.type === 'demo')
-    const real = accounts.find(a => a.type === 'real')
-
-    res.json({
-      success: true,
-      data: {
-        demo: fmt(demo?.balance),
-        real: fmt(real?.balance),
-        rate,
-      },
-    })
-  } catch (err) { next(err) }
-}
-
-async function getTransactions(req, res, next) {
-  try {
-    const { page = 1, limit = 20, type } = req.query
-    const offset = (parseInt(page) - 1) * parseInt(limit)
-    const transactions = await db.getTransactionsByUser(req.user.id, {
-      limit: parseInt(limit), 
-      offset, 
-      type,
-    })
-    res.json({ 
-      success: true, 
-      data: { 
-        transactions, 
-        page: parseInt(page), 
-        limit: parseInt(limit) 
-      } 
-    })
-  } catch (err) { next(err) }
-}
-
-async function getRateHandler(req, res, next) {
-  try {
-    const exchange = require('./exchange')
-    const rateData = await exchange.getExchangeRateWithMetadata()
-    res.json({
-      success: true,
-      data: {
-        rate: rateData.rate,
-        from: 'USD',
-        to: 'KES',
-        lastUpdated: rateData.updated_at,
-        source: rateData.source,
-      },
-    })
-  } catch (err) { next(err) }
-}
-
-async function depositMpesa(req, res, next) {
-  try {
-    const { phone, amountKES } = req.body
-    const userId = req.user.id
-
-    const formattedPhone = formatPhoneNumber(phone)
-    if (!formattedPhone) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid phone number. Use 07XXXXXXXX or 01XXXXXXXX format.',
-        code: 'VALIDATION_ERROR'
-      })
-    }
-
-    if (amountKES < 260) {
-      return res.status(400).json({
-        success: false,
-        error: 'Minimum deposit is KES 260 (~$2)',
-        code: 'VALIDATION_ERROR'
-      })
-    }
-
-    // Check for stale pending transactions
-    const { data: pending } = await db.supabase
-      .from('transactions')
-      .select('id, reference, created_at')
-      .eq('user_id', userId)
-      .eq('type', 'deposit')
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false })
-      .limit(1)
-
-    if (pending && pending.length > 0) {
-      const createdAt = new Date(pending[0].created_at)
-      const now = new Date()
-      const ageMinutes = (now - createdAt) / 60000
-
-      if (ageMinutes < 5) {
-        return res.json({
-          success: true,
-          data: {
-            reference: pending[0].reference,
-            message: 'Deposit already pending. Check your phone for the STK prompt.',
-            existing: true,
-          },
-        })
-      } else {
-        await db.updateTransactionStatus(pending[0].id, 'failed')
-        console.log(`[Deposit] Stale pending transaction ${pending[0].id} marked as failed`)
-      }
-    }
-
-    const rate = await db.getExchangeRate('USD', 'KES')
-    const amountUSD = parseFloat((amountKES / rate).toFixed(8))
-
-    // Generate reference BEFORE creating transaction
-    const txId = crypto.randomUUID()
-    const reference = `GWAVE_DEP_${txId.substring(0, 8).toUpperCase()}`
-
-    // Create transaction with reference already set
-    const tx = await db.createTransaction({
-      id: txId,
-      user_id: userId,
-      type: 'deposit',
-      amount_usd: amountUSD,
-      amount_kes: amountKES,
-      method: 'mpesa',
-      status: 'pending',
-      reference: reference,
-    })
-
-    let checkoutRequestId
-    try {
-      const result = await initiateStkPush(formattedPhone, Math.round(amountKES), reference)
-      checkoutRequestId = result.checkoutRequestId || result.reference || result.id
-    } catch (mpesaErr) {
-      console.error('[Deposit] STK Push failed:', mpesaErr.message)
-      await db.updateTransactionStatus(tx.id, 'failed')
-      return res.status(502).json({ 
-        success: false, 
-        error: 'Failed to initiate M-Pesa push. Please try again.',
-        code: 'MPESA_ERROR',
-        details: mpesaErr.message,
-      })
-    }
-
-    // Store the checkoutRequestId in the reference field (keep our reference too)
-    await db.updateTransactionStatus(tx.id, 'pending', checkoutRequestId)
-
-    if (req.idempotencyKey && req.idempotencyStore) {
-      await req.idempotencyStore({
-        success: true,
-        data: {
-          reference: checkoutRequestId,
-          message: 'STK Push sent. Approve the prompt on your phone.',
-        },
-      })
-    }
-
-    const response = {
-      success: true,
-      data: {
-        reference: checkoutRequestId,
-        transactionId: tx.id,
-        amount: amountKES,
-        currency: 'KES',
-        message: 'STK Push sent. Please check your phone and enter your PIN to complete the payment.',
-        ...(!HAS_PALPLUSS_CREDENTIALS && {
-          testMode: true,
-          note: 'Running in test mode - use /wallet/test/complete/:reference to manually complete',
-        }),
-      },
-    }
-
-    res.json(response)
+    contracts = await db.getOpenContractsBySymbol(symbolId, currentTick)
   } catch (err) {
-    console.error('[Deposit] Error:', err)
-    next(err)
+    console.error('Failed to fetch contracts for settlement:', err)
+    return
+  }
+
+  for (const contract of contracts) {
+    if (parseInt(contract.entry_tick) + parseInt(contract.duration_ticks) > currentTick) continue
+    await settleOneContract(contract, currentPrice)
   }
 }
 
-// ── Check pending transactions (polling endpoint) ─────────────────
+async function settleOneContract(contract, exitPrice) {
+  const outcome = resolveOutcome(contract, exitPrice)
+  const payout = outcome === 'win' ? parseFloat(contract.potential_payout) : 0
+  const pl = parseFloat((payout - parseFloat(contract.stake)).toFixed(8))
 
-async function checkPendingTransactions(req, res, next) {
   try {
-    const userId = req.user.id
-    
-    // Get all pending deposit transactions
-    const { data: pendingTxs, error } = await db.supabase
-      .from('transactions')
-      .select('id, reference, amount_usd, amount_kes, created_at, status')
-      .eq('user_id', userId)
-      .eq('type', 'deposit')
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false })
-
-    if (error) throw error
-
-    // If no pending transactions, return empty array
-    if (!pendingTxs || pendingTxs.length === 0) {
-      return res.json({ 
-        success: true, 
-        data: { 
-          transactions: [],
-          hasPending: false 
-        } 
-      })
-    }
-
-    const updatedTransactions = []
-    let hasPending = false
-
-    for (const tx of pendingTxs) {
-      // Check if the transaction is older than 5 minutes
-      const createdAt = new Date(tx.created_at)
-      const now = new Date()
-      const ageMinutes = (now - createdAt) / 60000
-
-      if (ageMinutes > 5) {
-        // Mark as failed if older than 5 minutes
-        await db.updateTransactionStatus(tx.id, 'failed')
-        updatedTransactions.push({
-          id: tx.id,
-          status: 'failed',
-          amount_usd: tx.amount_usd,
-          amount_kes: tx.amount_kes,
-        })
-        console.log(`[Polling] Transaction ${tx.id} marked as failed (timeout)`)
-        continue
-      }
-
-      // Check with PalPluss if we have a reference
-      if (tx.reference) {
-        try {
-          const result = await checkPalPlussTransactionStatus(tx.reference)
-          
-          if (result) {
-            const isSuccess = result.result_code === '0' || result.status === 'SUCCESS'
-            const isFailed = result.result_code !== '0' || result.status === 'FAILED' || result.status === 'CANCELLED'
-
-            if (isSuccess && tx.status === 'pending') {
-              await db.updateTransactionStatus(tx.id, 'completed', tx.reference)
-              
-              // Credit the account
-              const account = await db.getAccountByUserAndType(userId, 'real')
-              await db.addBalance(account.id, parseFloat(tx.amount_usd))
-              
-              updatedTransactions.push({
-                id: tx.id,
-                status: 'completed',
-                amount_usd: tx.amount_usd,
-                amount_kes: tx.amount_kes,
-              })
-              console.log(`[Polling] Transaction ${tx.id} marked as completed`)
-            } else if (isFailed && tx.status === 'pending') {
-              await db.updateTransactionStatus(tx.id, 'failed', tx.reference)
-              updatedTransactions.push({
-                id: tx.id,
-                status: 'failed',
-                amount_usd: tx.amount_usd,
-                amount_kes: tx.amount_kes,
-              })
-              console.log(`[Polling] Transaction ${tx.id} marked as failed`)
-            } else {
-              // Still pending - add to response so frontend knows
-              hasPending = true
-              updatedTransactions.push({
-                id: tx.id,
-                status: 'pending',
-                amount_usd: tx.amount_usd,
-                amount_kes: tx.amount_kes,
-              })
-            }
-          } else {
-            // Couldn't check status - assume still pending
-            hasPending = true
-            updatedTransactions.push({
-              id: tx.id,
-              status: 'pending',
-              amount_usd: tx.amount_usd,
-              amount_kes: tx.amount_kes,
-            })
-          }
-        } catch (err) {
-          console.error(`[Polling] Failed to check transaction ${tx.id}:`, err.message)
-          // Keep as pending
-          hasPending = true
-          updatedTransactions.push({
-            id: tx.id,
-            status: 'pending',
-            amount_usd: tx.amount_usd,
-            amount_kes: tx.amount_kes,
-          })
-        }
-      } else {
-        // No reference - keep as pending
-        hasPending = true
-        updatedTransactions.push({
-          id: tx.id,
-          status: 'pending',
-          amount_usd: tx.amount_usd,
-          amount_kes: tx.amount_kes,
-        })
-      }
-    }
-
-    res.json({ 
-      success: true, 
-      data: { 
-        transactions: updatedTransactions,
-        hasPending: hasPending || updatedTransactions.some(t => t.status === 'pending')
-      } 
+    await db.settleContract(contract.id, {
+      exitPrice,
+      outcome,
+      settledAt: new Date().toISOString(),
     })
-  } catch (err) {
-    console.error('[Polling] Error:', err)
-    next(err)
-  }
-}
 
-// ── Webhook Callback (just updates DB, no broadcast) ─────────────
-
-async function palplussCallback(req, res, next) {
-  try {
-    const payload = req.body
-    console.log('[PalPluss] Webhook received:', JSON.stringify(payload, null, 2))
-    
-    const { transaction } = payload
-
-    if (!transaction || !transaction.id) {
-      console.warn('[PalPluss] Invalid webhook payload - missing transaction')
-      return res.status(200).json({ success: true, received: true })
-    }
-
-    const { 
-      id: palplussTransactionId,
-      status,
-      result_code,
-      result_desc,
-      external_reference
-    } = transaction
-
-    console.log('[PalPluss] Looking up transaction by external_reference:', external_reference)
-
-    let tx = null
-    
-    if (external_reference) {
-      tx = await db.getTransactionByReference(external_reference)
-      if (tx) {
-        console.log('[PalPluss] Found transaction by external_reference:', tx.id)
-      }
-    }
-    
-    if (!tx) {
-      console.log('[PalPluss] Trying to find by PalPluss transaction ID:', palplussTransactionId)
-      tx = await db.getTransactionByReference(palplussTransactionId)
-      if (tx) {
-        console.log('[PalPluss] Found transaction by PalPluss ID:', tx.id)
-      }
-    }
-
-    if (!tx) {
-      console.warn(`[PalPluss] Unknown transaction. External ref: ${external_reference}, PalPluss ID: ${palplussTransactionId}`)
-      return res.status(200).json({ success: true, received: true })
-    }
-
-    console.log(`[PalPluss] Found transaction: ${tx.id} for user ${tx.user_id}`)
-
-    const isSuccess = result_code === '0' || status === 'SUCCESS'
-    const isFailed = result_code !== '0' || status === 'FAILED' || status === 'CANCELLED'
-
-    if (isSuccess && tx.status === 'pending') {
-      await db.updateTransactionStatus(tx.id, 'completed', palplussTransactionId)
-      console.log(`[PalPluss] Transaction ${tx.id} marked as completed`)
-      
-      if (tx.type === 'deposit') {
-        const account = await db.getAccountByUserAndType(tx.user_id, 'real')
-        await db.addBalance(account.id, parseFloat(tx.amount_usd))
-        console.log(`[PalPluss] Credited ${tx.amount_usd} USD to account ${account.id}`)
-      }
-    } else if (isFailed && tx.status === 'pending') {
-      await db.updateTransactionStatus(tx.id, 'failed', palplussTransactionId)
-      console.log(`[PalPluss] Transaction ${tx.id} marked as failed: ${result_desc || status}`)
-    }
-
-    res.status(200).json({ 
-      success: true, 
-      received: true,
-      message: 'Webhook processed successfully'
-    })
-    
-  } catch (err) {
-    console.error('[PalPluss] Webhook error:', err)
-    res.status(200).json({ 
-      success: true, 
-      received: true,
-      message: 'Webhook received with errors, but acknowledged'
-    })
-  }
-}
-
-// ── Manual completion for testing ─────────────────────────────────
-
-async function completeTransactionManually(req, res, next) {
-  try {
-    if (process.env.NODE_ENV !== 'development' && !req.isAdmin) {
-      return res.status(403).json({ 
-        success: false, 
-        error: 'Only available in development mode',
-        code: 'FORBIDDEN'
-      })
-    }
-
-    const { reference } = req.params
-    
-    const tx = await db.getTransactionByReference(reference)
-    if (!tx) {
-      return res.status(404).json({ 
-        success: false, 
-        error: 'Transaction not found',
-        code: 'NOT_FOUND'
-      })
-    }
-
-    if (tx.user_id !== req.user.id && !req.isAdmin) {
-      return res.status(403).json({
-        success: false,
-        error: 'Access denied',
-        code: 'FORBIDDEN'
-      })
-    }
-
-    if (tx.status !== 'pending') {
-      return res.status(400).json({
-        success: false,
-        error: `Transaction already ${tx.status}`,
-        code: 'INVALID_STATE'
-      })
-    }
-
-    await db.updateTransactionStatus(tx.id, 'completed', reference)
-
-    if (tx.type === 'deposit') {
-      const account = await db.getAccountByUserAndType(tx.user_id, 'real')
-      await db.addBalance(account.id, parseFloat(tx.amount_usd))
-      console.log(`[Test] Manually completed deposit ${tx.id} - Credited ${tx.amount_usd} USD`)
-    }
-
-    res.json({
-      success: true,
-      data: {
-        transactionId: tx.id,
+    if (outcome === 'win') {
+      await db.addBalance(contract.account_id, payout)
+      await db.createTransaction({
+        user_id: contract.user_id,
+        type: 'trade_win',
+        amount_usd: payout,
         status: 'completed',
-        amount: tx.amount_usd,
-        currency: 'USD',
-        message: 'Transaction completed manually for testing',
-      },
-    })
-  } catch (err) { 
-    console.error('[Test] Error completing transaction:', err)
-    next(err) 
-  }
-}
-
-// ── Withdrawal ─────────────────────────────────────────────────────
-
-async function withdrawMpesa(req, res, next) {
-  try {
-    const { phone, amountUSD } = req.body
-    const userId = req.user.id
-
-    const formattedPhone = formatPhoneNumber(phone)
-    if (!formattedPhone) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid phone number. Use 07XXXXXXXX or 01XXXXXXXX format.',
-        code: 'VALIDATION_ERROR'
+      })
+    } else {
+      await db.createTransaction({
+        user_id: contract.user_id,
+        type: 'trade_loss',
+        amount_usd: parseFloat(contract.stake),
+        status: 'completed',
       })
     }
 
-    const kycStatus = await getKycStatus(userId)
-    if (kycStatus !== 'approved') {
-      return res.status(403).json({
-        success: false,
-        error: 'KYC verification required.',
-        code: 'KYC_REQUIRED'
-      })
-    }
+    await db.updatePL(contract.account_id, pl)
 
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    const { count } = await db.supabase
-      .from('withdrawal_requests')
-      .select('*', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .gte('created_at', today.toISOString())
-      .in('status', ['pending_review', 'approved', 'processing', 'completed'])
-
-    if (count >= 3) {
-      return res.status(429).json({
-        success: false,
-        error: 'Maximum 3 withdrawals per day.',
-        code: 'RATE_LIMITED'
-      })
-    }
-
-    const { data: pending } = await db.supabase
-      .from('withdrawal_requests')
-      .select('id')
-      .eq('user_id', userId)
-      .eq('status', 'pending_review')
-      .single()
-
-    if (pending) {
-      return res.status(400).json({
-        success: false,
-        error: 'You have a pending withdrawal request.',
-        code: 'PENDING_WITHDRAWAL'
-      })
-    }
-
-    const account = await db.getAccountByUserAndType(userId, 'real')
-    if (parseFloat(account.balance) < amountUSD) {
-      return res.status(400).json({
-        success: false,
-        error: 'Insufficient balance.',
-        code: 'INSUFFICIENT_BALANCE'
-      })
-    }
-
-    const rate = await db.getExchangeRate('USD', 'KES')
-    const amountKES = Math.round(amountUSD * rate)
-
-    await db.deductBalance(account.id, amountUSD)
-
-    const { data: withdrawalReq, error: wError } = await db.supabase
-      .from('withdrawal_requests')
-      .insert({
-        user_id: userId,
-        amount_usd: amountUSD,
-        amount_kes: amountKES,
-        phone: formattedPhone,
-        status: 'pending_review',
-      })
-      .select()
-      .single()
-
-    if (wError) throw wError
-
-    const tx = await db.createTransaction({
-      user_id: userId,
-      type: 'withdrawal',
-      amount_usd: amountUSD,
-      amount_kes: amountKES,
-      method: 'mpesa',
-      status: 'pending',
-      metadata: { withdrawal_request_id: withdrawalReq.id },
-    })
-
-    await db.supabase
-      .from('withdrawal_requests')
-      .update({ transaction_id: tx.id })
-      .eq('id', withdrawalReq.id)
-
-    res.json({
-      success: true,
-      data: {
-        withdrawalId: withdrawalReq.id,
-        message: 'Withdrawal request submitted for review.',
-        status: 'pending_review',
-      },
-    })
   } catch (err) {
-    if (err.message === 'INSUFFICIENT_BALANCE') {
-      return res.status(400).json({ success: false, error: 'Insufficient balance.', code: 'INSUFFICIENT_BALANCE' })
-    }
-    next(err)
+    console.error('Settlement error for contract', contract.id, err)
+    return
+  }
+
+  notifyUser(contract.user_id, {
+    type: 'contract_settled',
+    contractId: contract.id,
+    outcome,
+    payout,
+    exitPrice,
+    pl,
+  })
+}
+
+// ── Engine ────────────────────────────────────────────────────────
+
+function startEngine() {
+  for (const symbol of Object.values(SYMBOLS)) {
+    setInterval(async () => {
+      const state = engineState[symbol.id]
+
+      state.price = nextPrice(state.price, symbol.sigma)
+      state.tickCount++
+
+      const change = parseFloat((state.price - state.sessionOpen).toFixed(5))
+      const changePct = parseFloat(((change / state.sessionOpen) * 100).toFixed(4))
+
+      const tick = {
+        symbol: symbol.id,
+        price: state.price,
+        tick: state.tickCount,
+        change,
+        changePct,
+        timestamp: Date.now(),
+      }
+
+      latestTick[symbol.id] = tick
+
+      tickBuffers[symbol.id].push(tick)
+      if (tickBuffers[symbol.id].length > TICK_BUFFER_SIZE) {
+        tickBuffers[symbol.id].shift()
+      }
+
+      broadcastTick(symbol.id, tick)
+      await settleExpiredContracts(symbol.id, state.price, state.tickCount)
+
+    }, symbol.tickIntervalMs)
   }
 }
 
-async function getWithdrawals(req, res, next) {
-  try {
-    const { data, error } = await db.supabase
-      .from('withdrawal_requests')
-      .select('*')
-      .eq('user_id', req.user.id)
-      .order('created_at', { ascending: false })
-    
-    if (error) throw error
-    res.json({ success: true, data: { withdrawals: data } })
-  } catch (err) { next(err) }
-}
+// ── WebSocket Handler ─────────────────────────────────────────────
 
-// ── KYC Upload ─────────────────────────────────────────────────────
+function handleWsConnection(ws, req) {
+  const url = new URL(req.url, 'http://localhost')
+  const token = url.searchParams.get('token')
+  let userId = null
 
-const kycStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, kycUploadPath)
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase()
-    const safe = `${req.user.id}_${file.fieldname}_${Date.now()}${ext}`
-    cb(null, safe)
-  },
-})
-
-const kycUpload = multer({
-  storage: kycStorage,
-  limits: { fileSize: 5 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const allowed = ['image/jpeg', 'image/png', 'application/pdf']
-    cb(null, allowed.includes(file.mimetype))
-  },
-})
-
-async function uploadKycDocuments(req, res, next) {
-  try {
-    const files = req.files
-    if (!files?.id_front || !files?.id_back || !files?.selfie) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'All three documents required.',
-        code: 'VALIDATION_ERROR' 
-      })
+  if (token) {
+    try {
+      const jwt = require('jsonwebtoken')
+      const payload = jwt.verify(token, process.env.SUPABASE_JWT_SECRET)
+      userId = payload.sub
+      if (!userConnections.has(userId)) userConnections.set(userId, new Set())
+      userConnections.get(userId).add(ws)
+    } catch {
+      // Invalid token - connection still allowed for public tick stream
     }
+  }
 
-    const userId = req.user.id
-    const { data: existing } = await db.supabase
-      .from('kyc_submissions')
-      .select('status')
-      .eq('user_id', userId)
-      .single()
+  ws.on('message', (raw) => {
+    let msg
+    try { msg = JSON.parse(raw.toString()) } catch { return }
 
-    if (existing && existing.status === 'pending') {
-      return res.status(400).json({
-        success: false,
-        error: 'KYC already pending review.',
-        code: 'KYC_PENDING'
-      })
+    switch (msg.type) {
+      case 'subscribe': {
+        const sym = msg.symbol
+        if (!SYMBOLS[sym]) {
+          return ws.send(JSON.stringify({ 
+            type: 'error', 
+            code: 'INVALID_SYMBOL', 
+            message: 'Unknown symbol' 
+          }))
+        }
+        subscribers[sym].add(ws)
+
+        ws.send(JSON.stringify({ 
+          type: 'history', 
+          symbol: sym, 
+          ticks: tickBuffers[sym] 
+        }))
+
+        if (latestTick[sym]) {
+          ws.send(JSON.stringify({ type: 'tick', ...latestTick[sym] }))
+        }
+        break
+      }
+
+      case 'unsubscribe':
+        subscribers[msg.symbol]?.delete(ws)
+        break
+
+      case 'ping':
+        ws.send(JSON.stringify({ type: 'pong' }))
+        break
     }
+  })
 
-    const docs = [
-      { user_id: userId, doc_type: 'id_front', file_path: files.id_front[0].path },
-      { user_id: userId, doc_type: 'id_back', file_path: files.id_back[0].path },
-      { user_id: userId, doc_type: 'selfie', file_path: files.selfie[0].path },
-    ]
-
-    for (const doc of docs) await db.createKycDocument(doc)
-
-    await db.supabase
-      .from('kyc_submissions')
-      .upsert({
-        user_id: userId,
-        status: 'pending',
-        submitted_at: new Date().toISOString(),
-      })
-
-    res.json({ success: true, data: { message: 'Documents submitted. Review takes 1–2 business days.' } })
-  } catch (err) { next(err) }
+  ws.on('close', () => {
+    for (const set of Object.values(subscribers)) set.delete(ws)
+    if (userId) userConnections.get(userId)?.delete(ws)
+  })
 }
 
-async function getKycStatusHandler(req, res, next) {
-  try {
-    const status = await getKycStatus(req.user.id)
-    const docs = await db.getKycDocumentsByUser(req.user.id)
-    res.json({
-      success: true,
-      data: {
-        status,
-        documents: docs.map(d => d.doc_type),
-        documentsSubmitted: docs.length,
-      },
-    })
-  } catch (err) { next(err) }
+function getLatestTick(symbolId) {
+  return latestTick[symbolId]
 }
-
-// ── Exports ──────────────────────────────────────────────────────
 
 module.exports = {
-  getBalance,
-  getTransactions,
-  getRateHandler,
-  depositMpesa,
-  palplussCallback,
-  withdrawMpesa,
-  getWithdrawals,
-  uploadKycDocuments,
-  getKycStatusHandler,
-  getKycStatus,
-  kycUpload,
-  initiateStkPush,
-  checkPalPlussTransactionStatus,
-  completeTransactionManually,
-  checkPendingTransactions,
-  formatPhoneNumber,
+  startEngine,
+  handleWsConnection,
+  getLatestTick,
+  calculatePayout,
+  resolveOutcome,
+  SYMBOLS,
+  PAYOUT_MULTIPLIERS,
+  OVER_UNDER_EDGE_MULTIPLIER,
 }

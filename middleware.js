@@ -151,27 +151,20 @@ function checkIdempotency() {
   }
 }
 
-/**
- * Format phone number for validation
- * Supports: 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX, 2541XXXXXXXX
- */
 function isValidKenyanPhone(phone) {
   if (!phone) return false
   const cleaned = phone.replace(/\s/g, '')
-  // Accept: 07XXXXXXXX, 01XXXXXXXX, 2547XXXXXXXX, 2541XXXXXXXX
-  // Also: 7XXXXXXXX, 1XXXXXXXX (without leading 0)
   const patterns = [
-    /^07\d{8}$/,           // 0712345678
-    /^01\d{8}$/,           // 0112345678
-    /^2547\d{8}$/,         // 254712345678
-    /^2541\d{8}$/,         // 254112345678
-    /^7\d{8}$/,            // 712345678
-    /^1\d{8}$/,            // 112345678
+    /^07\d{8}$/,
+    /^01\d{8}$/,
+    /^2547\d{8}$/,
+    /^2541\d{8}$/,
+    /^7\d{8}$/,
+    /^1\d{8}$/,
   ]
   return patterns.some(p => p.test(cleaned))
 }
 
-// Export the validator function for use elsewhere
 const validatePhone = (value) => {
   if (!isValidKenyanPhone(value)) {
     throw new Error('Phone must be in format 07XXXXXXXX or 01XXXXXXXX')
@@ -186,7 +179,7 @@ const validators = {
     body('contractType').isIn(['rise_fall', 'over_under', 'match_differ', 'even_odd']),
     body('direction').isIn(['rise', 'fall', 'over', 'under', 'match', 'differ', 'even', 'odd']),
     body('stake').isFloat({ min: 2 }).withMessage('Minimum stake is $2'),
-    body('durationTicks').isInt({ min: 1, max: 3600 }),
+    body('durationTicks').isInt({ min: 2, max: 3600 }).withMessage('Minimum duration is 2 ticks (2 seconds)'),
     body('selectedDigit').optional().isInt({ min: 0, max: 9 }),
   ],
 
