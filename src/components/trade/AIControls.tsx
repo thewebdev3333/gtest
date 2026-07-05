@@ -68,16 +68,28 @@ export function AIControls() {
   const [pendingDecision, setPendingDecision] = useState<AIDecision | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
   const analysisIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isMountedRef = useRef(true);
 
   const balance = account === "demo" ? demoBalance : realBalance;
   const isAutoRunning = autoTrade.isRunning;
+
+  // ── Cleanup on unmount ─────────────────────────────────────────
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (analysisIntervalRef.current) {
+        clearInterval(analysisIntervalRef.current);
+        analysisIntervalRef.current = null;
+      }
+    };
+  }, []);
 
   // ── Collect market data ─────────────────────────────────────────
 
   const collectMarketData = useCallback((): MarketData[] => {
     return VOLATILITIES.map((v) => {
-      // Use the global price with slight variations for each symbol
-      // In production, each symbol would have its own price feed
       const offset = v.id === 'v100_1s' ? 0 : v.id === 'v50_1s' ? -50 : -100;
       const symbolPrice = price + offset;
       const symbolPrevPrice = prevPrice + offset;
@@ -101,31 +113,42 @@ export function AIControls() {
       return;
     }
 
+    if (isAnalyzing) {
+      console.log('[AI] Analysis already in progress, skipping');
+      return;
+    }
+
     setIsAnalyzing(true);
+    
     try {
       const markets = collectMarketData();
       const decision = engine.evaluate(markets, balance, riskTolerance);
       
+      if (!isMountedRef.current) return;
+
       if (decision) {
         setDecision(decision);
         setPendingDecision(decision);
         setVolatility(decision.symbol);
         console.log('[AI] Decision made:', decision);
         
-        // Check if auto-execute is enabled
-        if (autoExecute) {
-          executeDecision(decision);
-        } else {
-          // Show toast with the decision
-          toast.info(`🤖 AI recommends ${decision.symbol} ${CONTRACT_LABELS[decision.contract]} ${decision.direction.toUpperCase()}`, {
+        // ✅ FIX: Only show toast if NOT auto-executing (auto-execute handles its own feedback)
+        if (!autoExecute) {
+          toast.info(`AI recommends ${decision.symbol} ${CONTRACT_LABELS[decision.contract]} ${decision.direction.toUpperCase()}`, {
             description: `Confidence: ${decision.confidence.toFixed(0)}% · EV: $${decision.expectedValue.toFixed(2)} per $1`,
             duration: 5000,
           });
+        } else {
+          // ✅ FIX: Auto-execute immediately if enabled
+          executeDecision(decision);
         }
       } else {
         setDecision(null);
         setPendingDecision(null);
-        toast.info('🤖 AI analysis complete — No clear opportunity found');
+        // Only show "no opportunity" toast if we're not running continuously
+        if (!aiRunning) {
+          toast.info('AI analysis complete — No clear opportunity found');
+        }
       }
       
       // Update performance
@@ -134,11 +157,15 @@ export function AIControls() {
       
     } catch (err) {
       console.error('[AI] Analysis error:', err);
-      toast.error('AI analysis failed');
+      if (isMountedRef.current) {
+        toast.error('AI analysis failed');
+      }
     } finally {
-      setIsAnalyzing(false);
+      if (isMountedRef.current) {
+        setIsAnalyzing(false);
+      }
     }
-  }, [engine, collectMarketData, balance, riskTolerance, setVolatility, autoExecute, isAutoRunning]);
+  }, [engine, collectMarketData, balance, riskTolerance, setVolatility, autoExecute, isAutoRunning, isAnalyzing, aiRunning]);
 
   // ── Execute AI decision ─────────────────────────────────────────
 
@@ -147,6 +174,8 @@ export function AIControls() {
       toast.warning('Auto trading is already running');
       return;
     }
+
+    if (isExecuting) return;
 
     setIsExecuting(true);
 
@@ -162,7 +191,7 @@ export function AIControls() {
         return;
       }
 
-      // ✅ Start auto-trade with AI's recommendation
+      // Start auto-trade with AI's recommendation
       startAutoTrade({
         direction: decisionToExecute.direction,
         contract: decisionToExecute.contract,
@@ -177,11 +206,12 @@ export function AIControls() {
         aiDecision: decisionToExecute,
       });
 
-      toast.success(`🤖 AI executed: ${decisionToExecute.symbol} ${CONTRACT_LABELS[decisionToExecute.contract]} ${decisionToExecute.direction.toUpperCase()}`, {
+      toast.success(`AI executed: ${decisionToExecute.symbol} ${CONTRACT_LABELS[decisionToExecute.contract]} ${decisionToExecute.direction.toUpperCase()}`, {
         description: `Stake: ${formatMoney(stake, currency, fxRate)} · Confidence: ${decisionToExecute.confidence.toFixed(0)}%`,
         duration: 5000,
       });
 
+      // ✅ FIX: Clear pending decision after execution
       setPendingDecision(null);
       setDecision(null);
 
@@ -189,9 +219,11 @@ export function AIControls() {
       console.error('[AI] Execution error:', err);
       toast.error('Failed to execute AI trade');
     } finally {
-      setIsExecuting(false);
+      if (isMountedRef.current) {
+        setIsExecuting(false);
+      }
     }
-  }, [balance, startAutoTrade, currency, fxRate, isAutoRunning]);
+  }, [balance, startAutoTrade, currency, fxRate, isAutoRunning, isExecuting]);
 
   // ── Authorize pending decision ──────────────────────────────────
 
@@ -207,6 +239,7 @@ export function AIControls() {
     if (pendingDecision) {
       toast.info(`AI recommendation rejected: ${pendingDecision.symbol} ${pendingDecision.direction.toUpperCase()}`);
       setPendingDecision(null);
+      setDecision(null);
     }
   }, [pendingDecision]);
 
@@ -219,35 +252,27 @@ export function AIControls() {
         clearInterval(analysisIntervalRef.current);
         analysisIntervalRef.current = null;
       }
-      toast.info('🤖 AI bot stopped');
+      toast.info('AI bot stopped');
     } else {
       setAiRunning(true);
       // Run immediately
       runAnalysis();
       // Then every 30 seconds
       analysisIntervalRef.current = setInterval(runAnalysis, 30000);
-      toast.info('🤖 AI bot started — analyzing markets...');
+      toast.info('AI bot started — analyzing markets...');
     }
   }, [aiRunning, runAnalysis]);
-
-  // ── Cleanup interval on unmount ─────────────────────────────────
-
-  useEffect(() => {
-    return () => {
-      if (analysisIntervalRef.current) {
-        clearInterval(analysisIntervalRef.current);
-        analysisIntervalRef.current = null;
-      }
-    };
-  }, []);
 
   // ── Record trade outcomes for AI learning ──────────────────────
 
   useEffect(() => {
     const settledTrades = trades.filter(t => t.status !== 'open');
+    let recordedCount = 0;
+    
     for (const trade of settledTrades) {
       const history = (engine as any).tradeHistory || [];
-      const alreadyRecorded = history.some((h: any) => h.tradeId === trade.id);
+      // ✅ FIX: Use trade ID for deduplication
+      const alreadyRecorded = history.some((h: any) => h.id === trade.id);
       if (!alreadyRecorded && trade.pnl !== undefined) {
         engine.recordTradeOutcome(
           trade.volatility,
@@ -257,15 +282,26 @@ export function AIControls() {
           trade.pnl > 0 ? 'win' : 'loss',
           trade.pnl
         );
-        setPerformance(engine.getPerformance());
+        recordedCount++;
       }
+    }
+    
+    if (recordedCount > 0) {
+      setPerformance(engine.getPerformance());
+      setDecisionHistory(engine.getDecisionHistory(10));
     }
   }, [trades, engine]);
 
   // ── Initial analysis on mount ──────────────────────────────────
 
   useEffect(() => {
-    runAnalysis();
+    // Delay initial analysis slightly to allow the store to hydrate
+    const timer = setTimeout(() => {
+      if (isMountedRef.current) {
+        runAnalysis();
+      }
+    }, 500);
+    return () => clearTimeout(timer);
   }, []);
 
   // ── Render ──────────────────────────────────────────────────────
@@ -293,13 +329,18 @@ export function AIControls() {
     }
   };
 
+  // Calculate win rate from performance
+  const winRate = performance && performance.totalDecisions > 0
+    ? (performance.wins / performance.totalDecisions) * 100
+    : 0;
+
   return (
     <div className="space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Brain className="h-5 w-5 text-primary" />
-          <span className="font-semibold">🤖 AI Trading</span>
+          <span className="font-semibold">AI Trading</span>
           {aiRunning && (
             <span className="relative flex h-2 w-2 ml-1">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-75" />
@@ -384,7 +425,7 @@ export function AIControls() {
           <div className="flex items-start justify-between">
             <div className="flex-1">
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-sm font-semibold">🤖 AI Recommendation</span>
+                <span className="text-sm font-semibold">AI Recommendation</span>
                 <Badge variant="outline" className="text-yellow-500 border-yellow-500 text-xs">
                   Pending Authorization
                 </Badge>
@@ -412,6 +453,9 @@ export function AIControls() {
               <div className="mt-2 text-xs text-muted-foreground space-y-0.5">
                 <div>• EV: ${pendingDecision.expectedValue.toFixed(2)} per $1 staked</div>
                 <div>• Win Rate: {pendingDecision.reasoning.winRate}</div>
+                {pendingDecision.reasoning.historicalAccuracy && (
+                  <div className="text-primary">• Historical Accuracy: {pendingDecision.reasoning.historicalAccuracy} ({pendingDecision.reasoning.sampleSize})</div>
+                )}
                 <div>• Volatility: {pendingDecision.reasoning.volatility}</div>
                 <div>• Trend: {pendingDecision.reasoning.trend}</div>
                 <div className="text-primary">• Stake: {formatMoney(pendingDecision.suggestedStake, currency, fxRate)}</div>
@@ -450,7 +494,7 @@ export function AIControls() {
             <CheckCircle2 className="h-5 w-5 text-primary flex-shrink-0 mt-0.5" />
             <div className="flex-1">
               <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold">🤖 AI Trade Active</span>
+                <span className="text-sm font-semibold">AI Trade Active</span>
                 <Badge variant="outline" className="text-primary border-primary text-xs">
                   Auto-Trading
                 </Badge>
@@ -481,12 +525,23 @@ export function AIControls() {
       )}
 
       {/* ─── NO DECISION ──────────────────────────────────────────── */}
-      {!pendingDecision && !isAutoRunning && !decision && (
+      {!pendingDecision && !isAutoRunning && !decision && !aiRunning && (
         <Card className="p-4 text-center text-sm text-muted-foreground border-dashed">
           <div className="py-4">
             <Sparkles className="h-8 w-8 mx-auto mb-2 text-muted-foreground/50" />
             <p>No clear opportunity found</p>
             <p className="text-xs">AI is waiting for better market conditions</p>
+          </div>
+        </Card>
+      )}
+
+      {/* ─── AI RUNNING — ANALYZING ──────────────────────────────── */}
+      {aiRunning && !pendingDecision && !isAutoRunning && (
+        <Card className="p-4 text-center text-sm text-muted-foreground border-dashed">
+          <div className="py-4">
+            <Activity className="h-8 w-8 mx-auto mb-2 text-primary/50 animate-pulse" />
+            <p>AI is monitoring the market...</p>
+            <p className="text-xs">Checking for opportunities every 30 seconds</p>
           </div>
         </Card>
       )}
@@ -500,10 +555,8 @@ export function AIControls() {
           </Card>
           <Card className="p-2 text-center">
             <div className="text-xs text-muted-foreground">Win Rate</div>
-            <div className="text-sm font-bold text-primary">
-              {performance.totalDecisions > 0
-                ? ((performance.wins / performance.totalDecisions) * 100).toFixed(0)
-                : 0}%
+            <div className={`text-sm font-bold ${winRate >= 50 ? 'text-primary' : 'text-destructive'}`}>
+              {winRate.toFixed(0)}%
             </div>
           </Card>
           <Card className="p-2 text-center">
@@ -537,7 +590,7 @@ export function AIControls() {
           </div>
           <div className="space-y-0.5 max-h-24 overflow-y-auto">
             {decisionHistory.slice(-5).reverse().map((d, i) => (
-              <div key={i} className="flex items-center justify-between text-xs bg-elevated/50 px-2 py-1 rounded">
+              <div key={`${d.timestamp}-${i}`} className="flex items-center justify-between text-xs bg-elevated/50 px-2 py-1 rounded">
                 <div className="flex items-center gap-2">
                   <span className="font-medium">{d.symbol}</span>
                   <span className="text-muted-foreground">{CONTRACT_LABELS[d.contract]}</span>
@@ -580,7 +633,6 @@ export function AIControls() {
           <AlertCircle className="h-4 w-4 text-yellow-500 flex-shrink-0 mt-0.5" />
           <div className="text-xs text-muted-foreground">
             <strong>Auto-execute is ON.</strong> The AI will automatically place trades when it finds a good opportunity.
-            {pendingDecision && ' A trade is pending — it will execute on the next analysis cycle.'}
           </div>
         </div>
       )}
