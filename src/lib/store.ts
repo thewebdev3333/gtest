@@ -66,6 +66,13 @@ export const PAYOUT_MULTIPLIER: Record<ContractType, number> = {
 // Mirrors OVER_UNDER_EDGE_MULTIPLIER in market.js.
 export const OVER_UNDER_EDGE_MULTIPLIER = 1.19;
 
+// ✅ FIXED: 'differ' wins on ~90% of digits and must be paid out at the same
+// reduced rate as the other ~90%-win-rate contracts (same idea as
+// OVER_UNDER_EDGE_MULTIPLIER above), not at PAYOUT_MULTIPLIER.match_differ
+// (8.00), which is only correct for the ~10%-win-rate 'match' direction.
+// Mirrors MATCH_DIFFER_DIFFER_MULTIPLIER in market.js.
+export const MATCH_DIFFER_DIFFER_MULTIPLIER = 1.19;
+
 // Instant, network-free payout estimate for UI preview purposes only.
 export function estimatePayout(
   contractType: ContractType,
@@ -85,6 +92,11 @@ export function estimatePayout(
       (selectedDigit === 0 && direction === "over") ||
       (selectedDigit === 9 && direction === "under");
     if (isEdge) multiplier = OVER_UNDER_EDGE_MULTIPLIER;
+  }
+
+  // ✅ FIXED: direction-aware payout for Match/Differ
+  if (contractType === "match_differ" && direction === "differ") {
+    multiplier = MATCH_DIFFER_DIFFER_MULTIPLIER;
   }
 
   return parseFloat((stake * multiplier).toFixed(8));
@@ -653,7 +665,10 @@ export const useApp = create<AppState>((set, get) => {
       }
       
       // ── CALL THE REAL BACKEND API ──────────────────────────────────
-      const payout = autoTrade.stake * PAYOUT_MULTIPLIER[autoTrade.contract];
+      // ✅ FIXED: was `autoTrade.stake * PAYOUT_MULTIPLIER[autoTrade.contract]`,
+      // a flat lookup that ignored the Over/Under edge case and paid 'Differ'
+      // at the 'Match' rate. estimatePayout() already applies both fixes.
+      const payout = estimatePayout(autoTrade.contract, autoTrade.stake, autoTrade.direction, autoTrade.barrier);
       const durationTicks = Math.max(2, Math.round(autoTrade.durationMs / 1000));
       
       try {

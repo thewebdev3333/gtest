@@ -1,5 +1,12 @@
 // src/lib/ai-engine.ts
-import { type VolatilityId, type Direction, type ContractType, VOLATILITIES, CONTRACTS, PAYOUT_MULTIPLIER, NEGATIVE_DIRECTIONS } from './store';
+import { type VolatilityId, type Direction, type ContractType, VOLATILITIES, CONTRACTS, PAYOUT_MULTIPLIER, OVER_UNDER_EDGE_MULTIPLIER, NEGATIVE_DIRECTIONS } from './store';
+
+// ✅ FIXED: 'differ' wins on ~90% of digits and must be paid out at the same
+// reduced rate as the other ~90%-win-rate contracts (mirrors
+// OVER_UNDER_EDGE_MULTIPLIER), not at the ~10%-win-rate 'match' rate.
+// This MUST stay in sync with MATCH_DIFFER_DIFFER_MULTIPLIER in the
+// backend's market.js — that file is the authoritative payout source.
+const MATCH_DIFFER_DIFFER_MULTIPLIER = 1.19;
 
 export interface MarketData {
   symbol: VolatilityId;
@@ -189,25 +196,29 @@ export class AIEngine {
     const ouPayout = PAYOUT_MULTIPLIER.over_under;
     
     // Over 0 — wins on digits 1-9 (90% theoretical)
+    // ✅ FIXED: this is the reduced-payout edge case in market.js, not the
+    // flat over_under rate — was previously inflating this option's EV to
+    // ~+1.59/$1 (real EV is ~-0.03/$1), which made it dominate the score.
     options.push({
       contract: 'over_under',
       direction: 'over' as Direction,
       barrier: 0,
       label: 'Over 0',
       winRate: this.estimateHistoricalWinRate(market.symbol, 'over_under', 'over', 0),
-      expectedValue: this.calculateExpectedValue('over_under', 'over', 0, ouPayout),
-      payoutMultiplier: ouPayout,
+      expectedValue: this.calculateExpectedValue(market.symbol, 'over_under', 'over', 0, OVER_UNDER_EDGE_MULTIPLIER),
+      payoutMultiplier: OVER_UNDER_EDGE_MULTIPLIER,
     });
 
     // Under 9 — wins on digits 0-8 (90% theoretical)
+    // ✅ FIXED: same edge-case payout as Over 0 above.
     options.push({
       contract: 'over_under',
       direction: 'under' as Direction,
       barrier: 9,
       label: 'Under 9',
       winRate: this.estimateHistoricalWinRate(market.symbol, 'over_under', 'under', 9),
-      expectedValue: this.calculateExpectedValue('over_under', 'under', 9, ouPayout),
-      payoutMultiplier: ouPayout,
+      expectedValue: this.calculateExpectedValue(market.symbol, 'over_under', 'under', 9, OVER_UNDER_EDGE_MULTIPLIER),
+      payoutMultiplier: OVER_UNDER_EDGE_MULTIPLIER,
     });
 
     // Over 5 — wins if lastDigit > 5 (40% theoretical)
@@ -217,7 +228,7 @@ export class AIEngine {
       barrier: 5,
       label: 'Over 5',
       winRate: this.estimateHistoricalWinRate(market.symbol, 'over_under', 'over', 5),
-      expectedValue: this.calculateExpectedValue('over_under', 'over', 5, ouPayout),
+      expectedValue: this.calculateExpectedValue(market.symbol, 'over_under', 'over', 5, ouPayout),
       payoutMultiplier: ouPayout,
     });
 
@@ -228,12 +239,12 @@ export class AIEngine {
       barrier: 5,
       label: 'Under 5',
       winRate: this.estimateHistoricalWinRate(market.symbol, 'over_under', 'under', 5),
-      expectedValue: this.calculateExpectedValue('over_under', 'under', 5, ouPayout),
+      expectedValue: this.calculateExpectedValue(market.symbol, 'over_under', 'under', 5, ouPayout),
       payoutMultiplier: ouPayout,
     });
 
     // ── Match/Differ ──────────────────────────────────────────────
-    const mdPayout = PAYOUT_MULTIPLIER.match_differ;
+    const mdPayout = PAYOUT_MULTIPLIER.match_differ; // 'match' rate only (~10% win rate)
     
     // Match each digit 0-9 (10% theoretical each)
     for (let digit = 0; digit <= 9; digit++) {
@@ -243,12 +254,16 @@ export class AIEngine {
         barrier: digit,
         label: `Match ${digit}`,
         winRate: this.estimateHistoricalWinRate(market.symbol, 'match_differ', 'match', digit),
-        expectedValue: this.calculateExpectedValue('match_differ', 'match', digit, mdPayout),
+        expectedValue: this.calculateExpectedValue(market.symbol, 'match_differ', 'match', digit, mdPayout),
         payoutMultiplier: mdPayout,
       });
     }
 
     // Differ each digit 0-9 (90% theoretical each)
+    // ✅ FIXED: was using mdPayout (8.00, the 'match' rate) here too, giving
+    // 'differ' bets an apparent EV of ~+7.1/$1 — the real backend rate is
+    // MATCH_DIFFER_DIFFER_MULTIPLIER (1.19), same as the other ~90%-win
+    // contracts, for a real EV of ~-0.03/$1.
     for (let digit = 0; digit <= 9; digit++) {
       options.push({
         contract: 'match_differ',
@@ -256,8 +271,8 @@ export class AIEngine {
         barrier: digit,
         label: `Differ ${digit}`,
         winRate: this.estimateHistoricalWinRate(market.symbol, 'match_differ', 'differ', digit),
-        expectedValue: this.calculateExpectedValue('match_differ', 'differ', digit, mdPayout),
-        payoutMultiplier: mdPayout,
+        expectedValue: this.calculateExpectedValue(market.symbol, 'match_differ', 'differ', digit, MATCH_DIFFER_DIFFER_MULTIPLIER),
+        payoutMultiplier: MATCH_DIFFER_DIFFER_MULTIPLIER,
       });
     }
 
@@ -270,7 +285,7 @@ export class AIEngine {
       barrier: undefined,
       label: 'Even',
       winRate: this.estimateHistoricalWinRate(market.symbol, 'even_odd', 'even'),
-      expectedValue: this.calculateExpectedValue('even_odd', 'even', undefined, eoPayout),
+      expectedValue: this.calculateExpectedValue(market.symbol, 'even_odd', 'even', undefined, eoPayout),
       payoutMultiplier: eoPayout,
     });
 
@@ -280,7 +295,7 @@ export class AIEngine {
       barrier: undefined,
       label: 'Odd',
       winRate: this.estimateHistoricalWinRate(market.symbol, 'even_odd', 'odd'),
-      expectedValue: this.calculateExpectedValue('even_odd', 'odd', undefined, eoPayout),
+      expectedValue: this.calculateExpectedValue(market.symbol, 'even_odd', 'odd', undefined, eoPayout),
       payoutMultiplier: eoPayout,
     });
 
@@ -321,15 +336,19 @@ export class AIEngine {
 
   /**
    * Calculate expected value for a contract option
+   * ✅ FIXED: previously hardcoded 'v100_1s' regardless of which market was
+   * actually being evaluated, so the EV component of the score for V50/V25
+   * markets was silently computed from V100's history instead of their own.
    */
   private calculateExpectedValue(
+    symbol: VolatilityId,
     contract: ContractType,
     direction: Direction,
     barrier: number | undefined,
     payoutMultiplier: number
   ): number {
     const winRate = this.estimateHistoricalWinRate(
-      'v100_1s' as VolatilityId, // Use aggregate data
+      symbol,
       contract,
       direction,
       barrier
