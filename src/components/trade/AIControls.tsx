@@ -1,6 +1,6 @@
 // src/components/trade/AIControls.tsx
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useApp, formatMoney, VOLATILITIES, CONTRACTS, type VolatilityId, type Direction, type ContractType } from "@/lib/store";
+import { useApp, formatMoney, VOLATILITIES, CONTRACTS, STAKE_RANGES, type VolatilityId, type Direction, type ContractType, type RiskTolerance } from "@/lib/store";
 import { AIEngine, getAIEngine, type AIDecision, type AIPerformance, type MarketData } from "@/lib/ai-engine";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -28,8 +28,6 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-type RiskTolerance = 'conservative' | 'moderate' | 'aggressive';
-
 const RISK_LABELS: Record<RiskTolerance, string> = {
   conservative: 'Conservative',
   moderate: 'Moderate',
@@ -42,6 +40,21 @@ const CONTRACT_LABELS: Record<ContractType, string> = {
   match_differ: 'Match/Differ',
   even_odd: 'Even/Odd',
 };
+
+type LockedContract = ContractType | 'auto';
+
+const LOCKED_CONTRACT_OPTIONS: { value: LockedContract; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'rise_fall', label: 'Rise/Fall' },
+  { value: 'over_under', label: 'Over/Under' },
+  { value: 'match_differ', label: 'Match/Differ' },
+  { value: 'even_odd', label: 'Even/Odd' },
+];
+
+// Sane bounds for the manual duration input, in seconds.
+const MIN_DURATION_SECONDS = 5;
+const MAX_DURATION_SECONDS = 3600;
+const DEFAULT_DURATION_SECONDS = 5;
 
 export function AIControls() {
   const autoTrade = useApp((s) => s.autoTrade);
@@ -67,6 +80,15 @@ export function AIControls() {
   const [decisionHistory, setDecisionHistory] = useState<AIDecision[]>([]);
   const [pendingDecision, setPendingDecision] = useState<AIDecision | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
+  // ✅ NEW: which contract the AI is restricted to ('auto' = AI picks any
+  // contract; otherwise the AI only considers that contract type and picks
+  // the best-scoring volatility/direction/barrier within it).
+  const [lockedContract, setLockedContract] = useState<LockedContract>('auto');
+  // ✅ NEW: trade duration in seconds, adjustable, defaults to a short 5s.
+  const [durationSeconds, setDurationSeconds] = useState(DEFAULT_DURATION_SECONDS);
+  // ✅ NEW: manual stake override. null = use the AI's suggested stake
+  // (itself now drawn from the risk tier's default range in STAKE_RANGES).
+  const [stakeOverride, setStakeOverride] = useState<number | null>(null);
   const analysisIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isMountedRef = useRef(true);
 
@@ -122,7 +144,12 @@ export function AIControls() {
     
     try {
       const markets = collectMarketData();
-      const decision = engine.evaluate(markets, balance, riskTolerance);
+      const decision = engine.evaluate(
+        markets,
+        balance,
+        riskTolerance,
+        lockedContract === 'auto' ? undefined : lockedContract
+      );
       
       if (!isMountedRef.current) return;
 
@@ -130,6 +157,9 @@ export function AIControls() {
         setDecision(decision);
         setPendingDecision(decision);
         setVolatility(decision.symbol);
+        // ✅ NEW: reset any prior manual override so the stake input shows
+        // this decision's own suggestion by default.
+        setStakeOverride(null);
         console.log('[AI] Decision made:', decision);
         
         // ✅ FIX: Only show toast if NOT auto-executing (auto-execute handles its own feedback)
@@ -165,7 +195,7 @@ export function AIControls() {
         setIsAnalyzing(false);
       }
     }
-  }, [engine, collectMarketData, balance, riskTolerance, setVolatility, autoExecute, isAutoRunning, isAnalyzing, aiRunning]);
+  }, [engine, collectMarketData, balance, riskTolerance, lockedContract, setVolatility, autoExecute, isAutoRunning, isAnalyzing, aiRunning]);
 
   // ── Execute AI decision ─────────────────────────────────────────
 
@@ -180,7 +210,10 @@ export function AIControls() {
     setIsExecuting(true);
 
     try {
-      const stake = decisionToExecute.suggestedStake;
+      // ✅ CHANGED: honor a manual stake override if the person set one,
+      // otherwise fall back to the AI's suggested stake (drawn from the
+      // risk tier's default range).
+      const stake = stakeOverride ?? decisionToExecute.suggestedStake;
       const stopLoss = decisionToExecute.suggestedStopLoss;
       const takeProfit = decisionToExecute.suggestedTakeProfit;
 
@@ -191,6 +224,10 @@ export function AIControls() {
         return;
       }
 
+      // ✅ CHANGED: duration is now adjustable (default 5s) instead of a
+      // hardcoded 60s.
+      const durationMs = durationSeconds * 1000;
+
       // Start auto-trade with AI's recommendation
       startAutoTrade({
         direction: decisionToExecute.direction,
@@ -199,9 +236,9 @@ export function AIControls() {
         stake: stake,
         stopLoss: stopLoss,
         takeProfit: takeProfit,
-        durationMs: 60000, // 60 seconds default
+        durationMs,
         durationUnit: 'seconds',
-        durationVal: 60,
+        durationVal: durationSeconds,
         barrier: decisionToExecute.barrier,
         aiDecision: decisionToExecute,
       });
@@ -223,7 +260,7 @@ export function AIControls() {
         setIsExecuting(false);
       }
     }
-  }, [balance, startAutoTrade, currency, fxRate, isAutoRunning, isExecuting]);
+  }, [balance, startAutoTrade, currency, fxRate, isAutoRunning, isExecuting, stakeOverride, durationSeconds]);
 
   // ── Authorize pending decision ──────────────────────────────────
 
@@ -400,7 +437,8 @@ export function AIControls() {
             <button
               key={level}
               onClick={() => setRiskTolerance(level)}
-              className={`flex-1 rounded-md py-1.5 text-xs font-medium transition ${
+              disabled={isAutoRunning}
+              className={`flex-1 rounded-md py-1.5 text-xs font-medium transition disabled:opacity-50 ${
                 riskTolerance === level
                   ? level === 'conservative'
                     ? 'bg-primary/20 text-primary border border-primary'
@@ -417,6 +455,94 @@ export function AIControls() {
             </button>
           ))}
         </div>
+        <div className="mt-1 text-[10px] text-muted-foreground">
+          Default stake range: ${STAKE_RANGES[riskTolerance][0]}–${STAKE_RANGES[riskTolerance][1]} (adjustable below)
+        </div>
+      </div>
+
+      {/* ✅ NEW: Contract lock — 'Auto' lets the AI pick any contract type;
+          otherwise it only considers the chosen contract and picks the
+          best-scoring volatility/direction/barrier within it. */}
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <Label className="text-xs text-muted-foreground">Contract</Label>
+          <span className="text-xs font-medium">
+            {lockedContract === 'auto' ? 'AI picks best contract' : CONTRACT_LABELS[lockedContract]}
+          </span>
+        </div>
+        <div className="grid grid-cols-5 gap-1">
+          {LOCKED_CONTRACT_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setLockedContract(opt.value)}
+              disabled={isAutoRunning}
+              className={`rounded-md py-1.5 text-[10px] font-medium transition disabled:opacity-50 ${
+                lockedContract === opt.value
+                  ? 'bg-primary/20 text-primary border border-primary'
+                  : 'bg-elevated text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ✅ NEW: Adjustable trade duration, defaults to a short 5 seconds */}
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <Label htmlFor="duration-seconds" className="text-xs text-muted-foreground">
+            Trade Duration
+          </Label>
+          <span className="text-xs font-medium">{durationSeconds}s</span>
+        </div>
+        <input
+          id="duration-seconds"
+          type="number"
+          min={MIN_DURATION_SECONDS}
+          max={MAX_DURATION_SECONDS}
+          step={1}
+          value={durationSeconds}
+          disabled={isAutoRunning}
+          onChange={(e) => {
+            const val = parseInt(e.target.value, 10);
+            if (Number.isNaN(val)) return;
+            const clamped = Math.min(MAX_DURATION_SECONDS, Math.max(MIN_DURATION_SECONDS, val));
+            setDurationSeconds(clamped);
+          }}
+          className="w-full rounded-md bg-elevated border border-border px-2 py-1.5 text-xs disabled:opacity-50"
+        />
+      </div>
+
+      {/* ✅ NEW: Manual stake override — pre-filled with the AI's suggested
+          stake for the current decision, editable at any time. */}
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <Label htmlFor="stake-override" className="text-xs text-muted-foreground">
+            Stake
+          </Label>
+          <span className="text-xs font-medium">
+            {formatMoney(
+              stakeOverride ?? pendingDecision?.suggestedStake ?? (STAKE_RANGES[riskTolerance][0] + STAKE_RANGES[riskTolerance][1]) / 2,
+              currency,
+              fxRate
+            )}
+          </span>
+        </div>
+        <input
+          id="stake-override"
+          type="number"
+          min={0.5}
+          step={0.5}
+          disabled={isAutoRunning}
+          value={stakeOverride ?? pendingDecision?.suggestedStake ?? (STAKE_RANGES[riskTolerance][0] + STAKE_RANGES[riskTolerance][1]) / 2}
+          onChange={(e) => {
+            const val = parseFloat(e.target.value);
+            if (Number.isNaN(val)) return;
+            setStakeOverride(Math.max(0.5, val));
+          }}
+          className="w-full rounded-md bg-elevated border border-border px-2 py-1.5 text-xs disabled:opacity-50"
+        />
       </div>
 
       {/* ─── PENDING DECISION — WAITING FOR AUTHORIZATION ──────── */}
@@ -458,7 +584,7 @@ export function AIControls() {
                 )}
                 <div>• Volatility: {pendingDecision.reasoning.volatility}</div>
                 <div>• Trend: {pendingDecision.reasoning.trend}</div>
-                <div className="text-primary">• Stake: {formatMoney(pendingDecision.suggestedStake, currency, fxRate)}</div>
+                <div className="text-primary">• Stake: {formatMoney(stakeOverride ?? pendingDecision.suggestedStake, currency, fxRate)}</div>
               </div>
             </div>
           </div>

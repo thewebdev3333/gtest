@@ -51,6 +51,17 @@ export const CONTRACTS: { id: ContractType; label: string }[] = [
 
 export const NEGATIVE_DIRECTIONS: Direction[] = ["fall", "under", "differ", "odd"];
 
+export type RiskTolerance = "conservative" | "moderate" | "aggressive";
+
+// Default stake range per risk tier, in dollars. These are DEFAULTS the AI
+// picks from when suggesting a stake — the person can always manually
+// override the final stake before a trade is placed or auto-trading starts.
+export const STAKE_RANGES: Record<RiskTolerance, [number, number]> = {
+  conservative: [2, 5],
+  moderate: [10, 25],
+  aggressive: [50, 100],
+};
+
 // ⚠️ These MUST always be kept in sync with PAYOUT_MULTIPLIERS in the
 // backend's market.js. They are used ONLY to render an instant preview
 // while the user is configuring a trade — the authoritative payout is
@@ -74,12 +85,18 @@ export const OVER_UNDER_EDGE_MULTIPLIER = 1.19;
 export const MATCH_DIFFER_DIFFER_MULTIPLIER = 1.19;
 
 // Instant, network-free payout estimate for UI preview purposes only.
+// Returns 0 for a barrier that isn't actually selectable (digit 9 on
+// Over/Under), so the UI can't show a preview for a bet that can't be placed.
 export function estimatePayout(
   contractType: ContractType,
   stake: number,
   direction?: Direction,
   selectedDigit?: number,
 ): number {
+  if (contractType === "over_under" && selectedDigit === 9) {
+    return 0;
+  }
+
   let multiplier = PAYOUT_MULTIPLIER[contractType] ?? 1.88;
 
   if (
@@ -263,9 +280,9 @@ const initialAutoTrade: AutoTradeConfig = {
   stopLoss: 20,
   takeProfit: 10,
   maxTrades: undefined,
-  durationMs: 10000,
+  durationMs: 5000,
   durationUnit: "ticks",
-  durationVal: 10,
+  durationVal: 5,
   barrier: undefined,
   isRunning: false,
   totalPnl: 0,

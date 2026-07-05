@@ -1,5 +1,5 @@
 // src/lib/ai-engine.ts
-import { type VolatilityId, type Direction, type ContractType, VOLATILITIES, CONTRACTS, PAYOUT_MULTIPLIER, OVER_UNDER_EDGE_MULTIPLIER, NEGATIVE_DIRECTIONS } from './store';
+import { type VolatilityId, type Direction, type ContractType, type RiskTolerance, VOLATILITIES, CONTRACTS, PAYOUT_MULTIPLIER, OVER_UNDER_EDGE_MULTIPLIER, STAKE_RANGES, NEGATIVE_DIRECTIONS } from './store';
 
 // ✅ FIXED: 'differ' wins on ~90% of digits and must be paid out at the same
 // reduced rate as the other ~90%-win-rate contracts (mirrors
@@ -7,6 +7,10 @@ import { type VolatilityId, type Direction, type ContractType, VOLATILITIES, CON
 // This MUST stay in sync with MATCH_DIFFER_DIFFER_MULTIPLIER in the
 // backend's market.js — that file is the authoritative payout source.
 const MATCH_DIFFER_DIFFER_MULTIPLIER = 1.19;
+
+// ✅ NEW: digit 9 is not a selectable Over/Under barrier (mirrors the real
+// platform). Must stay in sync with OVER_UNDER_MAX_DIGIT in market.js.
+const MAX_OVER_UNDER_DIGIT = 8;
 
 export interface MarketData {
   symbol: VolatilityId;
@@ -121,9 +125,17 @@ export class AIEngine {
   // ── Public Methods ──────────────────────────────────────────────
 
   /**
-   * Evaluate ALL markets and ALL contracts, return the best combination
+   * Evaluate ALL markets and ALL contracts, return the best combination.
+   * If `lockedContract` is given, only that contract type is considered —
+   * the AI still picks whichever market (volatility) and direction/barrier
+   * scores best for that contract.
    */
-  public evaluate(markets: MarketData[], balance: number, riskTolerance: 'conservative' | 'moderate' | 'aggressive' = 'moderate'): AIDecision | null {
+  public evaluate(
+    markets: MarketData[],
+    balance: number,
+    riskTolerance: RiskTolerance = 'moderate',
+    lockedContract?: ContractType
+  ): AIDecision | null {
     if (markets.length === 0) return null;
 
     // Generate all possible trade combinations
@@ -131,7 +143,12 @@ export class AIEngine {
 
     for (const market of markets) {
       // Generate options for each contract type
-      const options = this.generateContractOptions(market);
+      let options = this.generateContractOptions(market);
+      // If the person has locked in a contract type, restrict to it —
+      // the AI still evaluates every market for the best direction/barrier.
+      if (lockedContract) {
+        options = options.filter((o) => o.contract === lockedContract);
+      }
       for (const option of options) {
         // Calculate score for this combination
         const score = this.calculateCombinationScore(market, option, riskTolerance);
@@ -160,7 +177,7 @@ export class AIEngine {
 
     // Build the decision
     const confidence = Math.min(95, best.score);
-    const decision = this.buildDecision(best, balance, confidence);
+    const decision = this.buildDecision(best, balance, confidence, riskTolerance);
 
     this.decisions.push(decision);
     this.lastDecision = decision;
@@ -209,17 +226,13 @@ export class AIEngine {
       payoutMultiplier: OVER_UNDER_EDGE_MULTIPLIER,
     });
 
-    // Under 9 — wins on digits 0-8 (90% theoretical)
-    // ✅ FIXED: same edge-case payout as Over 0 above.
-    options.push({
-      contract: 'over_under',
-      direction: 'under' as Direction,
-      barrier: 9,
-      label: 'Under 9',
-      winRate: this.estimateHistoricalWinRate(market.symbol, 'over_under', 'under', 9),
-      expectedValue: this.calculateExpectedValue(market.symbol, 'over_under', 'under', 9, OVER_UNDER_EDGE_MULTIPLIER),
-      payoutMultiplier: OVER_UNDER_EDGE_MULTIPLIER,
-    });
+    // ✅ REMOVED: 'Under 9' (barrier 9) — digit 9 is no longer a selectable
+    // barrier for Over/Under, matching the real platform's restriction. This
+    // was also the highest-probability, lowest-payout option available, so
+    // dropping it removes one of the easiest bets to lean on repeatedly.
+    // MAX_OVER_UNDER_DIGIT below documents the allowed barrier range (0-8)
+    // for any future digit-sweep options — keep it in sync with market.js's
+    // OVER_UNDER_MAX_DIGIT if either changes.
 
     // Over 5 — wins if lastDigit > 5 (40% theoretical)
     options.push({
@@ -299,7 +312,11 @@ export class AIEngine {
       payoutMultiplier: eoPayout,
     });
 
-    return options;
+    // Defensive guard: no Over/Under option should ever carry barrier 9,
+    // even if a future edit adds one — keeps MAX_OVER_UNDER_DIGIT meaningful.
+    return options.filter(
+      (o) => o.contract !== 'over_under' || o.barrier === undefined || o.barrier <= MAX_OVER_UNDER_DIGIT
+    );
   }
 
   /**
@@ -420,7 +437,7 @@ export class AIEngine {
   private calculateCombinationScore(
     market: MarketData,
     option: ContractOption,
-    riskTolerance: 'conservative' | 'moderate' | 'aggressive'
+    riskTolerance: RiskTolerance
   ): number {
     const volatilityScore = this.calculateVolatilityScore(market);
     const trendScore = this.calculateTrendScore(market);
@@ -481,7 +498,8 @@ export class AIEngine {
   private buildDecision(
     best: ContractOption & { market: MarketData; score: number },
     balance: number,
-    confidence: number
+    confidence: number,
+    riskTolerance: RiskTolerance
   ): AIDecision {
     const isNegative = NEGATIVE_DIRECTIONS.includes(best.direction);
     
@@ -519,7 +537,7 @@ export class AIEngine {
         historicalAccuracy: historicalAccuracy !== undefined ? `${historicalAccuracy.toFixed(0)}%` : 'No data',
         sampleSize: sampleSize > 0 ? `${sampleSize} trades` : 'No history',
       },
-      suggestedStake: this.calculateSuggestedStake(balance, confidence, best.winRate),
+      suggestedStake: this.calculateSuggestedStake(balance, confidence, best.winRate, riskTolerance),
       suggestedStopLoss: this.calculateSuggestedStopLoss(balance, confidence),
       suggestedTakeProfit: this.calculateSuggestedTakeProfit(balance, confidence),
       timestamp: Date.now(),
@@ -589,16 +607,33 @@ export class AIEngine {
 
   // ── Suggested Values ─────────────────────────────────────────────
 
-  private calculateSuggestedStake(balance: number, confidence: number, winRate: number): number {
-    // Higher confidence and win rate = higher stake
-    const baseRisk = 0.01;
-    const confidenceBonus = (confidence / 100) * 0.015;
-    const winRateBonus = (winRate - 0.5) * 0.02;
-    const riskPercent = Math.max(0.005, Math.min(0.05, baseRisk + confidenceBonus + winRateBonus));
-    
-    let stake = balance * riskPercent;
+  /**
+   * ✅ CHANGED: stake now comes from the risk tier's configured dollar range
+   * (STAKE_RANGES in store.ts) — conservative $2-5, moderate $10-25,
+   * aggressive $50-100 by default — scaled within that range by confidence
+   * and win rate, rather than a pure percent-of-balance formula. This is
+   * only the AI's *suggested* stake; the person can always override it
+   * manually before a trade is placed.
+   */
+  private calculateSuggestedStake(balance: number, confidence: number, winRate: number, riskTolerance: RiskTolerance): number {
+    const [min, max] = STAKE_RANGES[riskTolerance];
+
+    // Blend confidence and win rate into a single 0-1 scale factor so
+    // stronger signals land closer to the top of the tier's range.
+    const confidenceFactor = confidence / 100;
+    const winRateFactor = Math.max(0, Math.min(1, (winRate - 0.5) / 0.5));
+    const scale = Math.max(0, Math.min(1, confidenceFactor * 0.6 + winRateFactor * 0.4));
+
+    let stake = min + (max - min) * scale;
+
+    // Safety net: never suggest more than 10% of balance, regardless of tier.
+    stake = Math.min(stake, balance * 0.10);
+
     stake = Math.round(stake * 2) / 2;
-    return Math.min(50, Math.max(2, stake));
+    // Clamp to the tier's range, but never force a stake the balance can't
+    // support — if the 10% balance cap above pulled it below the tier
+    // minimum, respect that lower number instead (floor of $0.5).
+    return Math.max(0.5, Math.min(max, stake));
   }
 
   private calculateSuggestedStopLoss(balance: number, confidence: number): number {
