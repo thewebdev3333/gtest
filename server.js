@@ -141,52 +141,77 @@ app.post('/trade/settle/:contractId',
   async (req, res, next) => {
     try {
       const { contractId } = req.params
-      const { exitPrice, accountType } = req.body
+      const { exitPrice } = req.body
 
-      // Get the contract
       const contract = await db.getContractById(contractId)
       if (!contract) {
-        return res.status(404).json({ 
-          success: false, 
-          error: 'Contract not found.', 
-          code: 'NOT_FOUND' 
+        return res.status(404).json({
+          success: false,
+          error: 'Contract not found.',
+          code: 'NOT_FOUND'
         })
       }
 
-      // Verify ownership
       if (contract.user_id !== req.user.id) {
-        return res.status(403).json({ 
-          success: false, 
-          error: 'Access denied.', 
-          code: 'FORBIDDEN' 
+        return res.status(403).json({
+          success: false,
+          error: 'Access denied.',
+          code: 'FORBIDDEN'
         })
       }
 
-      // Check if already settled
+      const account = await db.getAccountById(contract.account_id)
+      if (!account) {
+        return res.status(404).json({
+          success: false,
+          error: 'Account not found.',
+          code: 'NOT_FOUND'
+        })
+      }
+
       if (contract.status !== 'open') {
-        return res.status(400).json({ 
-          success: false, 
-          error: 'Contract already settled.', 
-          code: 'INVALID_STATE' 
+        const existingPayout = contract.outcome === 'win' ? parseFloat(contract.potential_payout) : 0
+        const existingPnl = existingPayout - parseFloat(contract.stake)
+        return res.json({
+          success: true,
+          data: {
+            contractId: contract.id,
+            outcome: contract.outcome,
+            pnl: existingPnl,
+            newBalance: parseFloat(account.balance),
+            accountType: account.type,
+            alreadySettled: true,
+          },
         })
       }
 
-      // Resolve outcome
       const outcome = market.resolveOutcome(contract, exitPrice)
       const payout = outcome === 'win' ? parseFloat(contract.potential_payout) : 0
       const pnl = payout - parseFloat(contract.stake)
 
-      // Get the account
-      const account = await db.getAccountByUserAndType(req.user.id, accountType)
-      if (!account) {
-        return res.status(404).json({ 
-          success: false, 
-          error: 'Account not found.', 
-          code: 'NOT_FOUND' 
+      const claimed = await db.settleContract(contract.id, {
+        exitPrice,
+        outcome,
+        settledAt: new Date().toISOString(),
+      })
+
+      if (!claimed) {
+        const settled = await db.getContractById(contract.id)
+        const updatedAccount = await db.getAccountById(contract.account_id)
+        const settledPayout = settled.outcome === 'win' ? parseFloat(settled.potential_payout) : 0
+        return res.json({
+          success: true,
+          data: {
+            contractId: settled.id,
+            outcome: settled.outcome,
+            pnl: settledPayout - parseFloat(settled.stake),
+            newBalance: parseFloat(updatedAccount.balance),
+            accountType: updatedAccount.type,
+            alreadySettled: true,
+          },
         })
       }
 
-      // Update balance in database
       if (outcome === 'win') {
         await db.addBalance(account.id, payout)
         console.log(`[Settle] User ${req.user.id} won ${payout} on contract ${contractId}`)
@@ -194,14 +219,8 @@ app.post('/trade/settle/:contractId',
         console.log(`[Settle] User ${req.user.id} lost on contract ${contractId}`)
       }
 
-      // Mark contract as settled
-      await db.settleContract(contract.id, {
-        exitPrice,
-        outcome,
-        settledAt: new Date().toISOString(),
-      })
+      await db.updatePL(account.id, pnl)
 
-      // Create transaction record
       await db.createTransaction({
         user_id: req.user.id,
         type: outcome === 'win' ? 'trade_win' : 'trade_loss',
@@ -209,8 +228,7 @@ app.post('/trade/settle/:contractId',
         status: 'completed',
       })
 
-      // Get updated balance
-      const updatedAccount = await db.getAccountByUserAndType(req.user.id, accountType)
+      const updatedAccount = await db.getAccountById(account.id)
 
       res.json({
         success: true,
@@ -219,11 +237,12 @@ app.post('/trade/settle/:contractId',
           outcome,
           pnl,
           newBalance: parseFloat(updatedAccount.balance),
+          accountType: updatedAccount.type,
         },
       })
-    } catch (err) { 
+    } catch (err) {
       console.error('[Settle] Error:', err)
-      next(err) 
+      next(err)
     }
   }
 )
