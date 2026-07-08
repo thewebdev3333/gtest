@@ -227,6 +227,16 @@ async function getExchangeRate(fromCcy, toCcy) {
   return data?.rate ?? parseFloat(process.env.DEFAULT_USD_KES_RATE || '130')
 }
 
+async function getAccountById(accountId) {
+  const { data, error } = await supabase
+    .from('accounts')
+    .select('*')
+    .eq('id', accountId)
+    .single()
+  if (error) throw error
+  return data
+}
+
 module.exports = {
   supabase,
   createUserAccounts,
@@ -235,6 +245,7 @@ module.exports = {
   deductBalance,
   addBalance,
   updatePL,
+  getAccountById,
   createContract,
   getOpenContractsByAccount,
   getContractsByAccount,
