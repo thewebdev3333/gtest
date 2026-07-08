@@ -122,11 +122,21 @@ async function getOpenContractsBySymbol(symbol, currentTick) {
 }
 
 async function settleContract(contractId, { exitPrice, outcome, settledAt }) {
-  const { error } = await supabase
+  // Atomic claim: only matches a row if it's STILL 'open' at the moment
+  // this runs. If another process already settled it (e.g. the client hit
+  // POST /trade/settle/:id right as the engine's own tick loop was about
+  // to settle the same expiring contract), this matches zero rows and
+  // `data` comes back empty. Callers must check the return value and skip
+  // crediting balance / writing a transaction when it's null, or the same
+  // win gets paid out twice.
+  const { data, error } = await supabase
     .from('contracts')
     .update({ exit_price: exitPrice, outcome, status: 'settled', settled_at: settledAt })
     .eq('id', contractId)
+    .eq('status', 'open')
+    .select()
   if (error) throw error
+  return data && data.length > 0 ? data[0] : null
 }
 
 // ── Transactions ──────────────────────────────────────────────────

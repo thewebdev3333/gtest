@@ -177,13 +177,25 @@ async function settleOneContract(contract, exitPrice) {
   const payout = outcome === 'win' ? parseFloat(contract.potential_payout) : 0
   const pl = parseFloat((payout - parseFloat(contract.stake)).toFixed(8))
 
+  let claimed
   try {
-    await db.settleContract(contract.id, {
+    claimed = await db.settleContract(contract.id, {
       exitPrice,
       outcome,
       settledAt: new Date().toISOString(),
     })
+  } catch (err) {
+    console.error('Settlement error for contract', contract.id, err)
+    return
+  }
 
+  if (!claimed) {
+    // Lost the race — some other path already settled this contract.
+    // Do nothing further, or we'd double-pay it.
+    return
+  }
+
+  try {
     if (outcome === 'win') {
       await db.addBalance(contract.account_id, payout)
       await db.createTransaction({
@@ -204,7 +216,7 @@ async function settleOneContract(contract, exitPrice) {
     await db.updatePL(contract.account_id, pl)
 
   } catch (err) {
-    console.error('Settlement error for contract', contract.id, err)
+    console.error('Post-settlement balance update error for contract', contract.id, err)
     return
   }
 
@@ -223,37 +235,39 @@ async function settleOneContract(contract, exitPrice) {
 function startEngine() {
   for (const symbol of Object.values(SYMBOLS)) {
     setInterval(async () => {
-      const state = engineState[symbol.id]
+      try {
+        const state = engineState[symbol.id]
 
-      state.price = nextPrice(state.price, symbol.sigma)
-      state.tickCount++
+        state.price = nextPrice(state.price, symbol.sigma)
+        state.tickCount++
 
-      const change = parseFloat((state.price - state.sessionOpen).toFixed(5))
-      const changePct = parseFloat(((change / state.sessionOpen) * 100).toFixed(4))
+        const change = parseFloat((state.price - state.sessionOpen).toFixed(5))
+        const changePct = parseFloat(((change / state.sessionOpen) * 100).toFixed(4))
 
-      const tick = {
-        symbol: symbol.id,
-        price: state.price,
-        tick: state.tickCount,
-        change,
-        changePct,
-        timestamp: Date.now(),
+        const tick = {
+          symbol: symbol.id,
+          price: state.price,
+          tick: state.tickCount,
+          change,
+          changePct,
+          timestamp: Date.now(),
+        }
+
+        latestTick[symbol.id] = tick
+
+        tickBuffers[symbol.id].push(tick)
+        if (tickBuffers[symbol.id].length > TICK_BUFFER_SIZE) {
+          tickBuffers[symbol.id].shift()
+        }
+
+        broadcastTick(symbol.id, tick)
+        await settleExpiredContracts(symbol.id, state.price, state.tickCount)
+      } catch (err) {
+        console.error(`[Engine] Error processing tick for ${symbol.id}:`, err)
       }
-
-      latestTick[symbol.id] = tick
-
-      tickBuffers[symbol.id].push(tick)
-      if (tickBuffers[symbol.id].length > TICK_BUFFER_SIZE) {
-        tickBuffers[symbol.id].shift()
-      }
-
-      broadcastTick(symbol.id, tick)
-      await settleExpiredContracts(symbol.id, state.price, state.tickCount)
-
     }, symbol.tickIntervalMs)
   }
 }
-
 // ── WebSocket Handler ─────────────────────────────────────────────
 
 function handleWsConnection(ws, req) {
