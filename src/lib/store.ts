@@ -978,36 +978,41 @@ export const useApp = create<AppState>((set, get) => {
         }
       });
       
-      wsInstance.on('contract_settled', (data) => {
-        console.log('[WS] Contract settled:', data);
+     wsInstance.on('contract_settled', (data) => {
+  console.log('[WS] Contract settled:', data);
 
-        get().syncTrades();
-        get().fetchBalances();
+  // ✅ Update the specific trade immediately using this payload, for
+  // ANY open trade matching this contract — not just the one tracked by
+  // auto-trade. This is the fast path; without it, closing a manual
+  // trade fell back on tick-engine.ts's ~3s grace-window REST poll.
+  const existing = get().trades.find(t => t.id === data.contractId);
+  let updatedTrade: Trade | undefined;
+  if (existing && existing.status === 'open') {
+    updatedTrade = {
+      ...existing,
+      status: data.outcome === 'win' ? 'won' : 'lost',
+      exitPrice: data.exitPrice,
+      pnl: data.pnl,
+    };
+    set((s) => ({
+      trades: s.trades.map((t) => (t.id === data.contractId ? updatedTrade! : t)),
+    }));
+  }
 
-        const autoTrade = get().autoTrade;
-        if (
-          autoTrade.isRunning &&
-          data.contractId === autoTrade.currentContractId &&
-          !autoSettledContractIds.has(data.contractId)
-        ) {
-          const trade = get().trades.find(t => t.id === data.contractId);
-          if (trade && trade.status === 'open') {
-            const updatedTrade: Trade = {
-              ...trade,
-              status: data.outcome === 'win' ? 'won' : 'lost',
-              exitPrice: data.exitPrice,
-              pnl: data.pnl,
-            };
+  get().syncTrades();
+  get().fetchBalances();
 
-            set((s) => ({
-              trades: s.trades.map((t) => t.id === data.contractId ? updatedTrade : t),
-            }));
-
-            autoSettledContractIds.add(data.contractId);
-            get().handleAutoTradeSettlement(updatedTrade);
-          }
-        }
-      });
+  const autoTrade = get().autoTrade;
+  if (
+    autoTrade.isRunning &&
+    data.contractId === autoTrade.currentContractId &&
+    updatedTrade &&
+    !autoSettledContractIds.has(data.contractId)
+  ) {
+    autoSettledContractIds.add(data.contractId);
+    get().handleAutoTradeSettlement(updatedTrade);
+  }
+});
 
       wsInstance.on('transaction_updated', (data) => {
         console.log('[WS] Transaction updated:', data);
