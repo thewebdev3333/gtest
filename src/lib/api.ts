@@ -35,7 +35,7 @@ export function removeToken() {
   sessionStorage.removeItem('gwave_token')
 }
 
-// ✅ NEW: typed error that carries the backend's error code and HTTP status
+// typed error that carries the backend's error code and HTTP status
 export class ApiError extends Error {
   code?: string
   status: number
@@ -180,15 +180,17 @@ export async function getExchangeRate(): Promise<RateResponse> {
   return apiFetch<RateResponse>('/wallet/rate')
 }
 
+// ✅ Updated: Deposit response interface for Daraja
 export interface DepositResponse {
   success: true
   data: {
-    reference: string
+    reference: string              // CheckoutRequestID
+    transactionId: string
+    amount: number                 // Amount in KES
+    currency: string              // 'KES'
     message: string
-    testMode?: boolean
-    manualComplete?: string
-    note?: string
-    existing?: boolean
+    checkoutRequestId: string     // Same as reference, for clarity
+    existing?: boolean            // If there's already a pending transaction
   }
 }
 

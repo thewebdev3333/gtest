@@ -59,17 +59,15 @@ export function DepositModal({
       const response = await depositMpesa(cleanPhone, kesAmount);
       
       if (response.success) {
-        toast.success("STK Push sent! Check your phone to authorize the payment.");
+        toast.success("STK Push sent! Check your phone to authorize the payment.", {
+          duration: 8000,
+        });
         
         // ✅ Trigger an immediate refresh so the pending transaction shows up right away
         onDeposited?.();
+        await fetchBalances(); // Refresh balances to show pending state
         
-        if (response.data.testMode) {
-          toast.info(`Test mode: Use ${response.data.manualComplete} to complete manually`, {
-            duration: 10000,
-          });
-        }
-        
+        // ✅ Close modal after successful STK push
         setTimeout(() => {
           onOpenChange(false);
           setPhone("");
@@ -78,7 +76,15 @@ export function DepositModal({
       }
     } catch (err: any) {
       console.error('[Deposit] Error:', err);
-      toast.error(err.message || "Failed to initiate deposit. Please try again.");
+      
+      // ✅ Better error handling for common M-Pesa errors
+      if (err.message?.includes('STK Push failed')) {
+        toast.error("Failed to send STK push. Please try again.");
+      } else if (err.message?.includes('Invalid phone number')) {
+        toast.error("Invalid phone number. Please check and try again.");
+      } else {
+        toast.error(err.message || "Failed to initiate deposit. Please try again.");
+      }
     } finally {
       setSubmitting(false);
     }
