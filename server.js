@@ -134,7 +134,7 @@ app.post('/trade/place',
   }
 )
 
-// ── ✅ NEW: Trade Settlement Endpoint ─────────────────────────────
+// ── Trade Settlement Endpoint ─────────────────────────────
 
 app.post('/trade/settle/:contractId',
   mw.authenticate,
@@ -304,7 +304,11 @@ app.post('/wallet/deposit/mpesa',
   wallet.depositMpesa
 )
 
-app.post('/wallet/palpluss/callback', wallet.palplussCallback)
+// ✅ Updated: M-Pesa callback endpoint for Daraja
+app.post('/wallet/mpesa/callback', wallet.mpesaCallback)
+
+// ❌ Commented out: PalPluss callback
+// app.post('/wallet/palpluss/callback', wallet.palplussCallback)
 
 app.post('/wallet/withdraw/mpesa', 
   mw.authenticate, 
@@ -340,7 +344,7 @@ if (process.env.NODE_ENV === 'development') {
       success: true,
       data: {
         mode: 'mock',
-        message: 'PalPluss is running in mock mode for local testing',
+        message: 'M-Pesa is running in mock mode for local testing',
         endpoints: {
           deposit: 'POST /wallet/deposit/mpesa',
           complete: 'POST /wallet/test/complete/:reference',

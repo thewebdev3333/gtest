@@ -12,11 +12,180 @@ if (!fs.existsSync(kycUploadPath)) {
   fs.mkdirSync(kycUploadPath, { recursive: true })
 }
 
-// ── PalPluss API Configuration ────────────────────────────────────
+// ── Daraja API Configuration ────────────────────────────────────
 
-const PALPLUSS_BASE_URL = process.env.PALPLUSS_BASE_URL || 'https://api.palpluss.com/v1'
-const PALPLUSS_API_KEY = process.env.PALPLUSS_API_KEY
-const PALPLUSS_BASIC_AUTH_TOKEN = process.env.PALPLUSS_BASIC_AUTH_TOKEN
+const MPESA_CONSUMER_KEY = process.env.MPESA_CONSUMER_KEY
+const MPESA_CONSUMER_SECRET = process.env.MPESA_CONSUMER_SECRET
+const MPESA_SHORTCODE = process.env.MPESA_SHORTCODE
+const MPESA_PASSKEY = process.env.MPESA_PASSKEY
+const MPESA_CALLBACK_URL = process.env.MPESA_CALLBACK_URL
+const MPESA_ENV = process.env.MPESA_ENV || 'development'
+
+// Determine base URLs based on environment
+const MPESA_BASE_URL = MPESA_ENV === 'production' 
+  ? 'https://api.safaricom.co.ke' 
+  : 'https://sandbox.safaricom.co.ke'
+
+console.log(`[M-Pesa] Environment: ${MPESA_ENV}`)
+console.log(`[M-Pesa] Base URL: ${MPESA_BASE_URL}`)
+console.log(`[M-Pesa] Shortcode: ${MPESA_SHORTCODE}`)
+
+// ── OAuth Token Management ──────────────────────────────────────
+
+let mpesaAccessToken = null
+let tokenExpiryTime = null
+
+async function getMpesaAccessToken() {
+  // Check if we have a valid token
+  if (mpesaAccessToken && tokenExpiryTime && Date.now() < tokenExpiryTime) {
+    return mpesaAccessToken
+  }
+
+  try {
+    const auth = Buffer.from(`${MPESA_CONSUMER_KEY}:${MPESA_CONSUMER_SECRET}`).toString('base64')
+    
+    const response = await fetch(`${MPESA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Basic ${auth}`,
+      },
+    })
+
+    if (!response.ok) {
+      const errorText = await response.text()
+      throw new Error(`OAuth failed: ${response.status} - ${errorText}`)
+    }
+
+    const data = await response.json()
+    
+    if (!data.access_token) {
+      throw new Error('No access token in response')
+    }
+
+    mpesaAccessToken = data.access_token
+    // Set expiry to 50 minutes (tokens last 1 hour)
+    tokenExpiryTime = Date.now() + (50 * 60 * 1000)
+    
+    console.log('[M-Pesa] Access token obtained successfully')
+    return mpesaAccessToken
+  } catch (error) {
+    console.error('[M-Pesa] Failed to get access token:', error.message)
+    throw new Error(`Failed to authenticate with M-Pesa: ${error.message}`)
+  }
+}
+
+// ── Daraja STK Push Implementation ──────────────────────────────
+
+async function initiateStkPush(phone, amountKES, reference) {
+  console.log(`[M-Pesa] STK Push to ${phone} for KES ${amountKES}, ref: ${reference}`)
+  
+  const formattedPhone = formatPhoneNumber(phone)
+  if (!formattedPhone) {
+    throw new Error('Invalid phone number format. Use 07XXXXXXXX, 01XXXXXXXX, or 2547XXXXXXXX')
+  }
+
+  const accessToken = await getMpesaAccessToken()
+  
+  // Format phone for STK Push (remove leading 0 or 254)
+  const phoneForSTK = formattedPhone.replace(/^254/, '')
+  
+  // Generate timestamp
+  const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)
+  
+  // Generate password
+  const passwordBuffer = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`)
+  const password = passwordBuffer.toString('base64')
+
+  // Prepare STK Push request
+  const stkData = {
+    BusinessShortCode: MPESA_SHORTCODE,
+    Password: password,
+    Timestamp: timestamp,
+    TransactionType: 'CustomerPayBillOnline',
+    Amount: Math.round(amountKES),
+    PartyA: formattedPhone,
+    PartyB: MPESA_SHORTCODE,
+    PhoneNumber: formattedPhone,
+    CallBackURL: MPESA_CALLBACK_URL,
+    AccountReference: reference || 'GWaveDeposit',
+    TransactionDesc: `G Wave deposit - ${reference}`,
+  }
+
+  console.log('[M-Pesa] STK Push request:', JSON.stringify({
+    ...stkData,
+    Password: '***HIDDEN***',
+  }, null, 2))
+
+  try {
+    const response = await fetch(`${MPESA_BASE_URL}/mpesa/stkpush/v1/processrequest`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(stkData),
+    })
+
+    const result = await response.json()
+    console.log('[M-Pesa] STK Push response:', JSON.stringify(result, null, 2))
+
+    if (!response.ok || result.ResponseCode !== '0') {
+      const errorMsg = result.ResponseDescription || result.errorMessage || 'STK Push failed'
+      throw new Error(`STK Push failed: ${errorMsg}`)
+    }
+
+    return {
+      checkoutRequestId: result.CheckoutRequestID,
+      merchantRequestId: result.MerchantRequestID,
+      responseCode: result.ResponseCode,
+      responseDescription: result.ResponseDescription,
+      customerMessage: result.CustomerMessage,
+    }
+  } catch (error) {
+    console.error('[M-Pesa] STK Push error:', error.message)
+    throw error
+  }
+}
+
+async function checkMpesaTransactionStatus(checkoutRequestId) {
+  try {
+    const accessToken = await getMpesaAccessToken()
+    
+    const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)
+    const passwordBuffer = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`)
+    const password = passwordBuffer.toString('base64')
+
+    const statusData = {
+      BusinessShortCode: MPESA_SHORTCODE,
+      Password: password,
+      Timestamp: timestamp,
+      CheckoutRequestID: checkoutRequestId,
+    }
+
+    const response = await fetch(`${MPESA_BASE_URL}/mpesa/stkpushquery/v1/query`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(statusData),
+    })
+
+    const result = await response.json()
+    console.log('[M-Pesa] Status query response:', JSON.stringify(result, null, 2))
+
+    if (!response.ok) {
+      throw new Error(`Status query failed: ${result.errorMessage || 'Unknown error'}`)
+    }
+
+    return result
+  } catch (error) {
+    console.error('[M-Pesa] Status check error:', error.message)
+    return null
+  }
+}
+
+// ── Phone Number Formatting ─────────────────────────────────────
 
 function formatPhoneNumber(phone) {
   let cleaned = phone.replace(/\s/g, '')
@@ -43,6 +212,15 @@ function formatPhoneNumber(phone) {
   
   return cleaned
 }
+
+// ── PalPluss Code (Commented Out) ──────────────────────────────
+
+/*
+// ── PalPluss API Configuration ────────────────────────────────────
+
+const PALPLUSS_BASE_URL = process.env.PALPLUSS_BASE_URL || 'https://api.palpluss.com/v1'
+const PALPLUSS_API_KEY = process.env.PALPLUSS_API_KEY
+const PALPLUSS_BASIC_AUTH_TOKEN = process.env.PALPLUSS_BASIC_AUTH_TOKEN
 
 function getAuthHeader() {
   if (PALPLUSS_BASIC_AUTH_TOKEN) {
@@ -107,7 +285,7 @@ async function palplussRequest(endpoint, method = 'POST', data = null) {
   }
 }
 
-async function initiateStkPush(phone, amountKES, reference, channelId = null) {
+async function initiateStkPushPalPluss(phone, amountKES, reference, channelId = null) {
   console.log(`[PalPluss] STK Push to ${phone} for KES ${amountKES}, ref: ${reference}`)
   
   const formattedPhone = formatPhoneNumber(phone)
@@ -144,6 +322,7 @@ async function checkPalPlussTransactionStatus(palplussTransactionId) {
     return null
   }
 }
+*/
 
 // ── Handler Functions ─────────────────────────────────────────────
 
@@ -281,8 +460,15 @@ async function depositMpesa(req, res, next) {
 
     let checkoutRequestId
     try {
+      // Using Daraja STK Push
       const result = await initiateStkPush(formattedPhone, Math.round(amountKES), reference)
-      checkoutRequestId = result.checkoutRequestId || result.reference || result.id
+      checkoutRequestId = result.checkoutRequestId
+      
+      // Store the checkoutRequestId in the reference field
+      await db.updateTransactionStatus(tx.id, 'pending', checkoutRequestId)
+      
+      console.log(`[Deposit] STK Push initiated. CheckoutRequestID: ${checkoutRequestId}`)
+      
     } catch (mpesaErr) {
       console.error('[Deposit] STK Push failed:', mpesaErr.message)
       await db.updateTransactionStatus(tx.id, 'failed')
@@ -293,9 +479,6 @@ async function depositMpesa(req, res, next) {
         details: mpesaErr.message,
       })
     }
-
-    // Store the checkoutRequestId in the reference field (keep our reference too)
-    await db.updateTransactionStatus(tx.id, 'pending', checkoutRequestId)
 
     if (req.idempotencyKey && req.idempotencyStore) {
       await req.idempotencyStore({
@@ -315,10 +498,7 @@ async function depositMpesa(req, res, next) {
         amount: amountKES,
         currency: 'KES',
         message: 'STK Push sent. Please check your phone and enter your PIN to complete the payment.',
-        ...(!HAS_PALPLUSS_CREDENTIALS && {
-          testMode: true,
-          note: 'Running in test mode - use /wallet/test/complete/:reference to manually complete',
-        }),
+        checkoutRequestId: checkoutRequestId,
       },
     }
 
@@ -326,6 +506,111 @@ async function depositMpesa(req, res, next) {
   } catch (err) {
     console.error('[Deposit] Error:', err)
     next(err)
+  }
+}
+
+// ── ✅ M-Pesa Callback (Daraja) ──────────────────────────────────
+
+async function mpesaCallback(req, res, next) {
+  try {
+    const payload = req.body
+    console.log('[M-Pesa] Callback received:', JSON.stringify(payload, null, 2))
+    
+    // Daraja callback structure
+    const { Body } = payload
+    
+    if (!Body || !Body.stkCallback) {
+      console.warn('[M-Pesa] Invalid callback payload - missing stkCallback')
+      return res.status(200).json({ 
+        ResultCode: 0, 
+        ResultDesc: 'Callback received but ignored (invalid payload)' 
+      })
+    }
+
+    const {
+      MerchantRequestID,
+      CheckoutRequestID,
+      ResultCode,
+      ResultDesc,
+      CallbackMetadata
+    } = Body.stkCallback
+
+    console.log(`[M-Pesa] Callback: CheckoutRequestID: ${CheckoutRequestID}, ResultCode: ${ResultCode}`)
+
+    // Find transaction by reference (checkoutRequestId stored in reference field)
+    let tx = await db.getTransactionByReference(CheckoutRequestID)
+    
+    if (!tx) {
+      // Try to find by merchant request ID
+      tx = await db.getTransactionByReference(MerchantRequestID)
+    }
+
+    if (!tx) {
+      console.warn(`[M-Pesa] Unknown transaction. CheckoutRequestID: ${CheckoutRequestID}, MerchantRequestID: ${MerchantRequestID}`)
+      // Still respond with success to avoid retries
+      return res.status(200).json({ ResultCode: 0, ResultDesc: 'Callback received' })
+    }
+
+    console.log(`[M-Pesa] Found transaction: ${tx.id} for user ${tx.user_id}`)
+
+    // If transaction is already completed or failed, ignore
+    if (tx.status !== 'pending') {
+      console.log(`[M-Pesa] Transaction ${tx.id} already ${tx.status}, ignoring callback`)
+      return res.status(200).json({ ResultCode: 0, ResultDesc: 'Callback received' })
+    }
+
+    // Process based on ResultCode
+    // 0 = Success, others = Failure
+    if (ResultCode === 0) {
+      // Success - extract payment details from metadata
+      let amount = 0
+      let phoneNumber = ''
+      let transactionDate = ''
+      
+      if (CallbackMetadata && CallbackMetadata.Item) {
+        for (const item of CallbackMetadata.Item) {
+          if (item.Name === 'Amount') {
+            amount = parseFloat(item.Value)
+          } else if (item.Name === 'MpesaReceiptNumber') {
+            // Store receipt number for reference
+          } else if (item.Name === 'PhoneNumber') {
+            phoneNumber = item.Value
+          } else if (item.Name === 'TransactionDate') {
+            transactionDate = item.Value
+          }
+        }
+      }
+
+      // Update transaction
+      await db.updateTransactionStatus(tx.id, 'completed', CheckoutRequestID)
+      console.log(`[M-Pesa] Transaction ${tx.id} marked as completed`)
+      
+      // Credit the account
+      const account = await db.getAccountByUserAndType(tx.user_id, 'real')
+      if (account) {
+        await db.addBalance(account.id, parseFloat(tx.amount_usd))
+        console.log(`[M-Pesa] Credited ${tx.amount_usd} USD to account ${account.id}`)
+      }
+
+    } else {
+      // Failed transaction
+      await db.updateTransactionStatus(tx.id, 'failed', CheckoutRequestID)
+      console.log(`[M-Pesa] Transaction ${tx.id} marked as failed: ${ResultDesc}`)
+    }
+
+    // Respond with success to Safaricom
+    res.status(200).json({ 
+      ResultCode: 0, 
+      ResultDesc: 'Callback processed successfully' 
+    })
+    
+  } catch (err) {
+    console.error('[M-Pesa] Callback error:', err)
+    // Always respond with success to prevent retries
+    res.status(200).json({ 
+      ResultCode: 0, 
+      ResultDesc: 'Callback received with errors, but acknowledged' 
+    })
   }
 }
 
@@ -379,21 +664,21 @@ async function checkPendingTransactions(req, res, next) {
         continue
       }
 
-      // Check with PalPluss if we have a reference
+      // Check with M-Pesa if we have a checkout request ID
       if (tx.reference) {
         try {
-          const result = await checkPalPlussTransactionStatus(tx.reference)
+          const result = await checkMpesaTransactionStatus(tx.reference)
           
           if (result) {
-            const isSuccess = result.result_code === '0' || result.status === 'SUCCESS'
-            const isFailed = result.result_code !== '0' || result.status === 'FAILED' || result.status === 'CANCELLED'
-
-            if (isSuccess && tx.status === 'pending') {
+            // Check if transaction is completed
+            if (result.ResultCode === '0' && result.ResultDesc === 'The service request is processed successfully.') {
               await db.updateTransactionStatus(tx.id, 'completed', tx.reference)
               
               // Credit the account
               const account = await db.getAccountByUserAndType(userId, 'real')
-              await db.addBalance(account.id, parseFloat(tx.amount_usd))
+              if (account) {
+                await db.addBalance(account.id, parseFloat(tx.amount_usd))
+              }
               
               updatedTransactions.push({
                 id: tx.id,
@@ -402,7 +687,9 @@ async function checkPendingTransactions(req, res, next) {
                 amount_kes: tx.amount_kes,
               })
               console.log(`[Polling] Transaction ${tx.id} marked as completed`)
-            } else if (isFailed && tx.status === 'pending') {
+            } else if (result.ResultCode !== '1037') {
+              // 1037 means still pending
+              // Any other code means failed
               await db.updateTransactionStatus(tx.id, 'failed', tx.reference)
               updatedTransactions.push({
                 id: tx.id,
@@ -412,7 +699,7 @@ async function checkPendingTransactions(req, res, next) {
               })
               console.log(`[Polling] Transaction ${tx.id} marked as failed`)
             } else {
-              // Still pending - add to response so frontend knows
+              // Still pending
               hasPending = true
               updatedTransactions.push({
                 id: tx.id,
@@ -467,8 +754,9 @@ async function checkPendingTransactions(req, res, next) {
   }
 }
 
-// ── Webhook Callback (just updates DB, no broadcast) ─────────────
+// ── PalPluss Callback (Commented Out) ──────────────────────────
 
+/*
 async function palplussCallback(req, res, next) {
   try {
     const payload = req.body
@@ -547,6 +835,7 @@ async function palplussCallback(req, res, next) {
     })
   }
 }
+*/
 
 // ── Manual completion for testing ─────────────────────────────────
 
@@ -830,7 +1119,8 @@ module.exports = {
   getTransactions,
   getRateHandler,
   depositMpesa,
-  palplussCallback,
+  mpesaCallback, // ✅ New Daraja callback
+  // palplussCallback, // ❌ Commented out
   withdrawMpesa,
   getWithdrawals,
   uploadKycDocuments,
@@ -838,7 +1128,8 @@ module.exports = {
   getKycStatus,
   kycUpload,
   initiateStkPush,
-  checkPalPlussTransactionStatus,
+  checkMpesaTransactionStatus, // ✅ New status check
+  // checkPalPlussTransactionStatus, // ❌ Commented out
   completeTransactionManually,
   checkPendingTransactions,
   formatPhoneNumber,
