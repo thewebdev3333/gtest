@@ -142,25 +142,31 @@ export interface Transaction {
   created_at: string
 }
 
+// src/lib/api.ts - Update TransactionsResponse and getTransactions
+
 export interface TransactionsResponse {
   success: true
   data: {
     transactions: Transaction[]
     page: number
     limit: number
+    total: number
+    totalPages: number
   }
 }
 
 export async function getTransactions(
   page = 1,
   limit = 20,
-  type?: string
+  type?: string,
+  status?: string  // ← Add status parameter
 ): Promise<TransactionsResponse> {
   const params = new URLSearchParams({
     page: String(page),
     limit: String(limit),
   })
   if (type) params.append('type', type)
+  if (status) params.append('status', status)  // ← Add status
   
   return apiFetch<TransactionsResponse>(`/wallet/transactions?${params}`)
 }
@@ -401,6 +407,8 @@ export async function getOpenPositions(accountType: string = 'real'): Promise<{
 }> {
   return apiFetch(`/positions/open?accountType=${accountType}`)
 }
+
+
 
 export async function getPositionHistory(
   page = 1,
