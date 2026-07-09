@@ -292,7 +292,37 @@ app.get('/positions/:id',
 // ── Wallet routes ──────────────────────────────────────────────────
 
 app.get('/wallet/balance', mw.authenticate, wallet.getBalance)
-app.get('/wallet/transactions', mw.authenticate, wallet.getTransactions)
+// In server.js - Replace the GET /wallet/transactions route
+
+app.get('/wallet/transactions', 
+  mw.authenticate, 
+  async (req, res, next) => {
+    try {
+      const { page = 1, limit = 20, type, status } = req.query
+      const offset = (parseInt(page) - 1) * parseInt(limit)
+      
+      const transactions = await db.getTransactionsByUser(req.user.id, {
+        limit: parseInt(limit), 
+        offset, 
+        type,
+        status,  // ← Add status filter
+      })
+      
+      const total = await db.getTransactionsCount(req.user.id, { type, status })
+      
+      res.json({ 
+        success: true, 
+        data: { 
+          transactions, 
+          page: parseInt(page), 
+          limit: parseInt(limit),
+          total,  // ← Add total count for pagination
+          totalPages: Math.ceil(total / parseInt(limit))
+        } 
+      })
+    } catch (err) { next(err) }
+  }
+)
 app.get('/wallet/rate', wallet.getRateHandler)
 app.get('/wallet/withdrawals', mw.authenticate, wallet.getWithdrawals)
 

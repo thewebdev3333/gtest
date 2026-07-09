@@ -151,17 +151,37 @@ async function createTransaction(data) {
   return tx
 }
 
-async function getTransactionsByUser(userId, { limit = 20, offset = 0, type } = {}) {
+// database.js - Replace the getTransactionsByUser function
+
+async function getTransactionsByUser(userId, { limit = 20, offset = 0, type, status } = {}) {
   let q = supabase
     .from('transactions')
     .select('*')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1)
+  
   if (type) q = q.eq('type', type)
+  if (status) q = q.eq('status', status)
+  
   const { data, error } = await q
   if (error) throw error
   return data
+}
+
+// Also add a count function for pagination
+async function getTransactionsCount(userId, { type, status } = {}) {
+  let q = supabase
+    .from('transactions')
+    .select('*', { count: 'exact', head: true })
+    .eq('user_id', userId)
+  
+  if (type) q = q.eq('type', type)
+  if (status) q = q.eq('status', status)
+  
+  const { count, error } = await q
+  if (error) throw error
+  return count || 0
 }
 
 async function updateTransactionStatus(transactionId, status, reference = null) {
@@ -254,6 +274,7 @@ module.exports = {
   settleContract,
   createTransaction,
   getTransactionsByUser,
+  getTransactionsCount,
   updateTransactionStatus,
   getTransactionByReference,
   createKycDocument,
