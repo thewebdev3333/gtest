@@ -27,7 +27,6 @@ app.use(express.json({ limit: '10kb' }))
 app.use(morgan('combined'))
 app.use(mw.apiLimiter)
 
-
 //static file serving
 app.use(express.static('public'));
 
@@ -40,8 +39,6 @@ app.get('/health', (req, res) => {
     uptime: process.uptime()
   })
 })
-
-// server.js - Add this before the admin routes
 
 // ── Admin Login ───────────────────────────────────────────────────
 app.post('/admin/login', async (req, res) => {
@@ -57,19 +54,6 @@ app.post('/admin/login', async (req, res) => {
     }
 
     // Sign in using the anon-key client (mw.supabaseAuth), NOT db.supabase.
-    // db.supabase is the service-role client, shared as a module-level
-    // singleton across the whole app (auth.js, admin.js, requireRole, etc.)
-    // specifically so it can bypass RLS. Calling .auth.signInWithPassword()
-    // on a supabase-js client makes that client start sending the signed-in
-    // user's access token as the Authorization header on every subsequent
-    // .from() call instead of the service-role key it was built with. Doing
-    // that on db.supabase would silently "downgrade" it for the rest of the
-    // process to acting as whichever admin last logged in — every query
-    // anywhere in the app (getUsers, getPendingKyc, getAllTransactions,
-    // getPlatformStats, even requireRole's own role check) would then run
-    // under RLS as that one user, which is why the dashboard only showed
-    // that admin's own rows. mw.supabaseAuth is a separate anon-key client
-    // used only for this sign-in exchange, so db.supabase never gets touched.
     const { data, error } = await mw.supabaseAuth.auth.signInWithPassword({
       email,
       password,
@@ -83,14 +67,7 @@ app.post('/admin/login', async (req, res) => {
       });
     }
 
-    // Check if user has a role allowed through this login form — safe to use
-    // db.supabase here, this is a plain .from() read, not an auth call, so it
-    // doesn't touch its session.
-    // This same form is also used for influencer sign-in (login.html reads
-    // `role` from the response below to decide whether to redirect to
-    // /admin/dashboard.html or /admin/influencer.html), so 'influencer' is
-    // allowed alongside 'admin'. Every other role (user, support, tech) has
-    // no page under /admin/ to land on and stays rejected.
+    // Check if user has a role allowed through this login form
     const { data: roleData, error: roleError } = await db.supabase
       .from('user_roles')
       .select('role')
@@ -106,6 +83,18 @@ app.post('/admin/login', async (req, res) => {
       });
     }
 
+    // Get display name - simple approach with fallback, never crashes
+    let displayName = data.user.email?.split('@')[0] || 'User';
+    try {
+      const { data: userData } = await mw.supabaseAuth.auth.getUser(data.session.access_token);
+      if (userData?.user?.user_metadata?.display_name) {
+        displayName = userData.user.user_metadata.display_name;
+      }
+    } catch (err) {
+      // Silently fall back to email-based name, never crash
+      console.warn('[Login] Could not fetch user metadata, using email fallback');
+    }
+
     res.json({
       success: true,
       data: {
@@ -113,7 +102,8 @@ app.post('/admin/login', async (req, res) => {
         user: {
           id: data.user.id,
           email: data.user.email,
-          role: roleData.role
+          role: roleData.role,
+          displayName: displayName
         }
       }
     });
@@ -132,6 +122,7 @@ app.post('/admin/login', async (req, res) => {
 app.post('/auth/on-signup', auth.onSignup)
 app.get('/auth/me', mw.authenticate, auth.getMe)
 app.patch('/auth/profile', mw.authenticate, mw.validators.updateProfile, mw.validate, auth.updateProfile)
+app.get('/auth/profile', mw.authenticate, auth.getProfile)
 
 // ── Trade routes ───────────────────────────────────────────────────
 
@@ -383,8 +374,6 @@ app.get('/positions/:id',
 // ── Wallet routes ──────────────────────────────────────────────────
 
 app.get('/wallet/balance', mw.authenticate, wallet.getBalance)
-// In server.js - Replace the GET /wallet/transactions route
-
 app.get('/wallet/transactions', 
   mw.authenticate, 
   async (req, res, next) => {
@@ -396,7 +385,7 @@ app.get('/wallet/transactions',
         limit: parseInt(limit), 
         offset, 
         type,
-        status,  // ← Add status filter
+        status,
       })
       
       const total = await db.getTransactionsCount(req.user.id, { type, status })
@@ -407,7 +396,7 @@ app.get('/wallet/transactions',
           transactions, 
           page: parseInt(page), 
           limit: parseInt(limit),
-          total,  // ← Add total count for pagination
+          total,
           totalPages: Math.ceil(total / parseInt(limit))
         } 
       })
@@ -425,11 +414,7 @@ app.post('/wallet/deposit/mpesa',
   wallet.depositMpesa
 )
 
-// ✅ Updated: M-Pesa callback endpoint for Daraja
 app.post('/wallet/mpesa/callback', wallet.mpesaCallback)
-
-// ❌ Commented out: PalPluss callback
-// app.post('/wallet/palpluss/callback', wallet.palplussCallback)
 
 app.post('/wallet/withdraw/mpesa', 
   mw.authenticate, 
@@ -578,9 +563,7 @@ app.post('/admin/influencer-withdrawals/:id/mark-failed',
   admin.markInfluencerWithdrawalFailed
 )
 
-// ── Influencer routes (mock withdrawal demo flow) ───────────────────
-// Influencers cannot access the admin dashboard — requireRole('influencer')
-// is a distinct role from 'admin', so these are the only endpoints they can hit.
+// ── Influencer routes ───────────────────────────────────────────────
 
 app.get('/influencer/balance',
   mw.authenticate,

@@ -84,7 +84,7 @@ async function requestWithdrawal(req, res, next) {
       status: 'pending',
     })
 
-    await db.createTransaction({
+    const transaction = await db.createTransaction({
       user_id: userId,
       type: 'withdrawal',
       amount_usd: amountUSD,
@@ -92,11 +92,40 @@ async function requestWithdrawal(req, res, next) {
       metadata: { mock: true, influencer_withdrawal_id: withdrawal.id },
     })
 
+    // ── Auto-complete after a short delay ──────────────────────────────
+    // Since this is a mock flow for influencers, we auto-complete the
+    // withdrawal after 2 seconds to simulate the money being sent to M-PESA.
+    // This removes the need for admin approval and makes the demo flow smooth.
+    setTimeout(async () => {
+      try {
+        // Mark the influencer withdrawal as 'sent' (simulating money sent to M-PESA)
+        const claimed = await db.updateInfluencerWithdrawalStatus(
+          withdrawal.id, 
+          'sent', 
+          { 
+            simulatedBy: userId, 
+            notes: 'Auto-completed (mock flow)' 
+          }
+        )
+
+        if (claimed) {
+          // Update the transaction status to 'completed'
+          await db.updateTransactionStatus(transaction.id, 'completed')
+          console.log(`[Influencer] Auto-completed withdrawal ${withdrawal.id} for user ${userId}`)
+        } else {
+          console.warn(`[Influencer] Withdrawal ${withdrawal.id} already resolved, skipping auto-complete`)
+        }
+      } catch (err) {
+        console.error(`[Influencer] Failed to auto-complete withdrawal ${withdrawal.id}:`, err.message)
+      }
+    }, 2000) // 2 second delay
+
+    // Return immediately with pending status, but it will auto-complete shortly
     res.json({
       success: true,
       data: {
         withdrawalId: withdrawal.id,
-        message: 'Withdrawal recorded.',
+        message: 'Withdrawal recorded and will be sent to your M-PESA shortly.',
         status: 'pending',
         newBalance: parseFloat(account.balance) - amountUSD,
       },

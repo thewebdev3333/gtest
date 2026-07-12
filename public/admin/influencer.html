@@ -177,13 +177,14 @@
     .balance-card{
         position: relative;
         background: #1e1e1e;
-        height: 100%;
+        height: calc(100% + 2px);
         width: 100%;
         border-radius: 8px;
         padding: 18px;
         display: flex;
         flex-direction: column;
         overflow: hidden;
+        transform: translateY(-1px);
     }
 
     .balance-card::after{
@@ -207,7 +208,7 @@
     }
 
     .card-label.blue-text{
-        color: #4fb6e8;
+        color: #3ee06a;
     }
 
     .balance-hidden{
@@ -215,71 +216,94 @@
         align-items: center;
         gap: 0.7rem;
         margin-top: 14px;
+        min-height: 32px;
     }
 
-    .blur-box{
-        height: 20px;
-        width: 130px;
-        background: #3a3a3a;
+    /* Value container with blur overlay */
+    .balance-value-wrap {
+        position: relative;
+        display: inline-block;
+        min-width: 120px;
+        height: 28px;
+        flex-shrink: 0;
         border-radius: 4px;
-        filter: blur(3px);
-        transition: filter 0.15s ease;
+        overflow: hidden;
     }
 
-    .blur-box.small{
-        width: 90px;
-        height: 14px;
-        margin-top: 8px;
-    }
-
-    .blur-box.fuliza-blur{
-        width: 150px;
-        height: 14px;
-        margin-top: 14px;
-    }
-
-    .balance-value{
-        font-size: 1.3rem;
+    .balance-value {
+        font-size: 1.1rem;
         font-weight: 600;
         letter-spacing: 0.3px;
+        white-space: nowrap;
+        line-height: 28px;
+        position: relative;
+        z-index: 1;
+    }
+
+    /* Blur overlay with backdrop-filter */
+    .blur-overlay {
+        position: absolute;
+        inset: 0;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        background: rgba(58, 58, 58, 0.3);
+        border-radius: 4px;
+        transition: opacity 0.25s ease;
+        opacity: 1;
+        z-index: 2;
+    }
+
+    /* When revealed, hide the blur overlay */
+    .balance-card.revealed .blur-overlay {
+        opacity: 0;
     }
 
     .balance-sub{
         font-size: 0.8rem;
         color: #8f8f8f;
         margin-top: 8px;
-        min-height: 14px;
-    }
-
-    /* revealed state: swap blur boxes for real numbers */
-    .balance-card.revealed .blur-box{
-        display: none;
-    }
-
-    .balance-card .balance-value,
-    .balance-card .balance-sub,
-    .balance-card .fuliza-line{
-        display: none;
-    }
-
-    .balance-card.revealed .balance-value,
-    .balance-card.revealed .balance-sub,
-    .balance-card.revealed .fuliza-line{
-        display: block;
+        min-height: 20px;
     }
 
     .balance-hidden ion-icon{
         font-size: 20px;
         color: #b0b0b0;
         cursor: pointer;
+        flex-shrink: 0;
     }
 
-    .fuliza-line{
+    /* Fuliza line with blur */
+    .fuliza-wrap {
+        position: relative;
+        display: inline-block;
+        margin-top: 14px;
+        min-height: 20px;
+        border-radius: 4px;
+        overflow: hidden;
+    }
+
+    .fuliza-line {
         font-size: 0.8rem;
         color: #b0b0b0;
-        margin-top: 14px;
         position: relative;
         z-index: 1;
+        white-space: nowrap;
+    }
+
+    .fuliza-blur {
+        position: absolute;
+        inset: 0;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        background: rgba(58, 58, 58, 0.3);
+        border-radius: 4px;
+        transition: opacity 0.25s ease;
+        opacity: 1;
+        z-index: 2;
+    }
+
+    .balance-card.revealed .fuliza-blur {
+        opacity: 0;
     }
 
     /* ---------- My Balances (Airtime / Data) card ---------- */
@@ -324,11 +348,12 @@
         background: transparent;
         position: relative;
         z-index: 1;
+        cursor: pointer;
     }
 
     .card-btn.blue{
-        border-color: #4fb6e8;
-        color: #4fb6e8;
+        border-color: #3ee06a;
+        color: #3ee06a;
     }
 
     .airtime-row{
@@ -360,7 +385,7 @@
     }
 
     .dots span{
-        height: 6px;
+        height: 4px;
         width: 6px;
         border-radius: 50%;
         background: #3f3f3f;
@@ -368,7 +393,7 @@
 
     .dots span.active{
         background: #2fb872;
-        width: 16px;
+        width: 22px;
         border-radius: 3px;
     }
 
@@ -557,77 +582,6 @@
         transform: scale(1.5);
     }
 
-    /* ---------- Statements (read-only, presents influencer_withdrawals) ---------- */
-
-    .statements-panel{
-        background: #1a1a1a;
-        margin: 12px 20px;
-        border-radius: 14px;
-        padding: 18px;
-    }
-
-    .statements-panel h3{
-        font-size: 1rem;
-        font-weight: 600;
-        margin-bottom: 14px;
-    }
-
-    .statements-list{
-        display: flex;
-        flex-direction: column;
-        gap: 10px;
-    }
-
-    .statement-row{
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        background: #121212;
-        border-radius: 10px;
-        padding: 12px 14px;
-    }
-
-    .statement-amount{
-        font-size: 0.92rem;
-        font-weight: 600;
-    }
-
-    .statement-date{
-        font-size: 0.72rem;
-        color: #8f8f8f;
-        margin-top: 3px;
-    }
-
-    .statement-status{
-        font-size: 0.7rem;
-        font-weight: 600;
-        text-transform: capitalize;
-        padding: 4px 10px;
-        border-radius: 20px;
-    }
-
-    .statement-status.sent{
-        background: rgba(62,224,106,0.15);
-        color: #3ee06a;
-    }
-
-    .statement-status.pending{
-        background: rgba(255,184,0,0.15);
-        color: #ffb800;
-    }
-
-    .statement-status.failed{
-        background: rgba(239,68,68,0.15);
-        color: #ef4444;
-    }
-
-    .statements-empty{
-        color: #8f8f8f;
-        font-size: 0.85rem;
-        text-align: center;
-        padding: 20px 0;
-    }
-
 </style>
 </head>
 <body>
@@ -635,14 +589,14 @@
     <header>
         <div class="greeting">
             <div class="avatar-wrap">
-                <div id="initials">VO</div>
+                <div id="initials">LD</div>
                 <div class="avatar-chevron" onclick="handleInfluencerLogout()" style="cursor:pointer;" title="Logout">
                     <ion-icon name="chevron-down"></ion-icon>
                 </div>
             </div>
             <div class="greeting-text">
                 <p>Good evening,</p>
-                <p id="fname">Valentine 👋</p>
+                <p id="fname">Loading... 👋</p>
             </div>
         </div>
 
@@ -673,15 +627,17 @@
             <div class="balance-card" id="mpesaCard">
                 <p class="card-label green-text">M-PESA Balance</p>
                 <div class="balance-hidden">
-                    <div class="blur-box"></div>
-                    <span class="balance-value" id="mpesaBalanceValue">Ksh. 0.00</span>
+                    <div class="balance-value-wrap">
+                        <span class="balance-value" id="mpesaBalanceValue">Ksh 0.00</span>
+                        <div class="blur-overlay"></div>
+                    </div>
                     <ion-icon name="eye-outline" class="eye-toggle" onclick="toggleBalance('mpesaCard', this)"></ion-icon>
                 </div>
-                <div class="blur-box small"></div>
-                <p class="balance-sub">Available balance</p>
-                <div class="blur-box fuliza-blur"></div>
-                <p class="fuliza-line">Available Fuliza: Ksh 300.00</p>
-                <div class="card-btn" id="viewStatementsBtn" onclick="document.getElementById('statementsPanel').scrollIntoView({behavior:'smooth'})" style="cursor:pointer;">View Statements</div>
+                <div class="fuliza-wrap">
+                    <p class="fuliza-line">Available Fuliza: Ksh 300.00</p>
+                    <div class="fuliza-blur"></div>
+                </div>
+                <div class="card-btn" onclick="window.location.reload()">View Statements</div>
             </div>
         </div>
 
@@ -692,7 +648,7 @@
                 <div class="split-row">
                     <div class="split-col">
                         <p>Airtime</p>
-                        <p class="amount">Ksh. 22.67</p>
+                        <p class="amount">Ksh 22.67</p>
                     </div>
                     <div class="split-divider"></div>
                     <div class="split-col">
@@ -822,13 +778,6 @@
         <ion-icon name="chevron-down"></ion-icon>
     </div>
 
-    <div class="statements-panel" id="statementsPanel">
-        <h3>Statements</h3>
-        <div class="statements-list" id="statementsList">
-            <p class="statements-empty">Loading...</p>
-        </div>
-    </div>
-
     <div class="explore-heading">Explore &amp; Discover Deals 🔥</div>
 
     <div class="promo-banner">
@@ -869,24 +818,18 @@
     <script>
     (function(){
         const API_URL = window.location.origin;
-        let latestRate = 130; // overwritten by /influencer/balance once it loads
+        let exchangeRate = 130;
 
-        // ── Token handling (mirrors dashboard.html / login.html) ──
         function getToken(){
             const params = new URLSearchParams(window.location.search);
             const urlToken = params.get('token');
             if (urlToken) {
                 sessionStorage.setItem('gwave_admin_token', urlToken);
-                // Strip the token out of the visible URL once it's stored.
                 window.history.replaceState({}, document.title, window.location.pathname);
             }
             return sessionStorage.getItem('gwave_admin_token') || '';
         }
 
-        // This page only presents whatever's already in influencer_withdrawals —
-        // there's no action here that can fail in a way the person needs to be
-        // told about, so failures are logged and shown inline rather than as
-        // toasts. Actual withdrawals are initiated from the main trading app.
         async function apiFetch(endpoint){
             const token = sessionStorage.getItem('gwave_admin_token');
             const headers = {};
@@ -899,6 +842,7 @@
                 if (res.status === 401) {
                     sessionStorage.removeItem('gwave_admin_token');
                     sessionStorage.removeItem('gwave_admin_user');
+                    sessionStorage.removeItem('gwave_admin_display_name');
                     window.location.href = '/admin/login.html';
                 }
                 throw new Error(data.error || 'Request failed.');
@@ -906,101 +850,110 @@
             return data;
         }
 
-        function fmtKes(value){
+        function fmtKES(value){
             const n = parseFloat(value || 0);
-            return 'Ksh. ' + n.toLocaleString('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            return 'Ksh ' + n.toLocaleString('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
         }
 
-        // Usernames here are a single word (the part of the email before '@'),
-        // not a full "first last" name, so the usual first-word+last-word
-        // initials trick collapses to one letter. Fall back to first+last
-        // letter of that single word so it's always two characters; and if
-        // the word itself is only one character, double it as a last resort.
-        function getInitials(raw){
-            const parts = (raw || '').split(/[.\-_ ]+/).filter(Boolean);
-            if (!parts.length) return '??';
+        function getDisplayNameAndInitials(displayName) {
+            const parts = (displayName || '').split(/[\s._-]+/).filter(Boolean);
+            let firstName = parts[0] || 'User';
+            firstName = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
+
+            let initials = '';
             if (parts.length >= 2) {
-                return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+                initials = (parts[0][0] + parts[parts.length-1][0]).toUpperCase();
+            } else {
+                const word = parts[0] || 'User';
+                if (word.length >= 2) {
+                    initials = (word[0] + word[word.length-1]).toUpperCase();
+                } else {
+                    initials = (word[0] + word[0]).toUpperCase();
+                }
             }
-            const word = parts[0];
-            return word.length >= 2
-                ? (word[0] + word[word.length - 1]).toUpperCase()
-                : (word[0] + word[0]).toUpperCase();
+            return { firstName, initials };
         }
 
-        function applyGreeting(){
-            const user = JSON.parse(sessionStorage.getItem('gwave_admin_user') || 'null');
+        async function loadUserProfile() {
+            try {
+                const res = await apiFetch('/auth/profile');
+                if (res.success && res.data) {
+                    sessionStorage.setItem('gwave_admin_display_name', res.data.displayName);
+                    applyGreetingAndInitials(res.data.displayName);
+                }
+            } catch (err) {
+                console.warn('[Profile] Failed to load profile:', err.message);
+                const user = JSON.parse(sessionStorage.getItem('gwave_admin_user') || 'null');
+                if (user && user.displayName) {
+                    applyGreetingAndInitials(user.displayName);
+                } else if (user && user.email) {
+                    const namePart = user.email.split('@')[0];
+                    applyGreetingAndInitials(namePart);
+                }
+            }
+        }
+
+        function applyGreetingAndInitials(displayName) {
             const hour = new Date().getHours();
             const greetWord = hour < 12 ? 'Good morning,' : hour < 18 ? 'Good afternoon,' : 'Good evening,';
             const greetEl = document.querySelector('.greeting-text p');
             if (greetEl) greetEl.textContent = greetWord;
 
-            if (user && user.email) {
-                const namePart = user.email.split('@')[0];
-                const display = namePart.charAt(0).toUpperCase() + namePart.slice(1);
-                document.getElementById('fname').textContent = `${display} 👋`;
-                document.getElementById('initials').textContent = getInitials(namePart);
+            const name = displayName || sessionStorage.getItem('gwave_admin_display_name') || 'User';
+            
+            const { firstName, initials } = getDisplayNameAndInitials(name);
+            document.getElementById('fname').textContent = firstName + ' 👋';
+            document.getElementById('initials').textContent = initials;
+        }
+
+        async function fetchExchangeRate(){
+            try {
+                const res = await apiFetch('/wallet/rate');
+                if (res.success && res.data && res.data.rate) {
+                    exchangeRate = res.data.rate;
+                }
+            } catch (err) {
+                console.warn('[Influencer] Failed to fetch exchange rate, using fallback:', err.message);
             }
         }
 
         async function loadBalance(){
             try {
                 const res = await apiFetch('/influencer/balance');
-                const { mpesaBalance, rate } = res.data;
-                latestRate = rate;
-                document.getElementById('mpesaBalanceValue').textContent = fmtKes(mpesaBalance.kes);
+                const { totalWithdrawn } = res.data;
+
+                const totalWithdrawnKES = totalWithdrawn * exchangeRate;
+                document.getElementById('mpesaBalanceValue').textContent = fmtKES(totalWithdrawnKES);
+
             } catch (err) {
                 console.error('[Influencer] Failed to load balance:', err.message);
-                document.getElementById('mpesaBalanceValue').textContent = 'Ksh. —';
+                document.getElementById('mpesaBalanceValue').textContent = 'Ksh 0.00';
             }
         }
 
-        // Presents whatever rows exist in influencer_withdrawals — read only,
-        // nothing here is clickable or actionable.
-        async function loadStatements(){
-            const list = document.getElementById('statementsList');
-            try {
-                const res = await apiFetch('/influencer/withdrawals');
-                const withdrawals = res.data.withdrawals || [];
-
-                if (!withdrawals.length) {
-                    list.innerHTML = '<p class="statements-empty">No withdrawals yet.</p>';
-                    return;
-                }
-
-                list.innerHTML = withdrawals.map(w => {
-                    const kes = parseFloat(w.amount_usd) * latestRate;
-                    const date = new Date(w.created_at).toLocaleString('en-KE', { dateStyle: 'medium', timeStyle: 'short' });
-                    return `<div class="statement-row">
-                        <div>
-                            <p class="statement-amount">${fmtKes(kes)}</p>
-                            <p class="statement-date">${date}</p>
-                        </div>
-                        <span class="statement-status ${w.status}">${w.status}</span>
-                    </div>`;
-                }).join('');
-            } catch (err) {
-                console.error('[Influencer] Failed to load statements:', err.message);
-                list.innerHTML = '<p class="statements-empty">Unable to load statements.</p>';
-            }
-        }
-
-        // ── Init ──
         (async function init(){
             const token = getToken();
             if (!token) {
                 window.location.href = '/admin/login.html';
                 return;
             }
-            applyGreeting();
+            
+            await loadUserProfile();
+            
+            await fetchExchangeRate();
             await loadBalance();
-            await loadStatements();
+
+            setInterval(async () => {
+                await fetchExchangeRate();
+                await loadBalance();
+            }, 30000);
         })();
 
         window.handleInfluencerLogout = function(){
             if (confirm('Are you sure you want to logout?')) {
                 sessionStorage.removeItem('gwave_admin_token');
                 sessionStorage.removeItem('gwave_admin_user');
+                sessionStorage.removeItem('gwave_admin_display_name');
                 window.location.href = '/admin/login.html';
             }
         };

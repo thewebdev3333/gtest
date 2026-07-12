@@ -688,16 +688,16 @@ async function withdrawMpesa(req, res, next) {
     }
 
     // Only require KYC for withdrawals over $100
-if (amountUSD > 100) {
-  const kycStatus = await getKycStatus(userId)
-  if (kycStatus !== 'approved') {
-    return res.status(403).json({
-      success: false,
-      error: 'KYC verification required for withdrawals over $100.',
-      code: 'KYC_REQUIRED'
-    })
-  }
-}
+    if (amountUSD > 100) {
+      const kycStatus = await getKycStatus(userId)
+      if (kycStatus !== 'approved') {
+        return res.status(403).json({
+          success: false,
+          error: 'KYC verification required for withdrawals over $100.',
+          code: 'KYC_REQUIRED'
+        })
+      }
+    }
 
     const today = new Date()
     today.setHours(0, 0, 0, 0)
@@ -790,17 +790,78 @@ if (amountUSD > 100) {
   }
 }
 
+// ── GET /wallet/withdrawals - Unified withdrawal list ──────────────
+
 async function getWithdrawals(req, res, next) {
   try {
-    const { data, error } = await db.supabase
+    const userId = req.user.id
+    
+    // Get regular withdrawal requests
+    const { data: regularWithdrawals, error: regularError } = await db.supabase
       .from('withdrawal_requests')
       .select('*')
-      .eq('user_id', req.user.id)
+      .eq('user_id', userId)
       .order('created_at', { ascending: false })
-    
-    if (error) throw error
-    res.json({ success: true, data: { withdrawals: data } })
-  } catch (err) { next(err) }
+
+    if (regularError) throw regularError
+
+    // Check if user is an influencer - only fetch influencer withdrawals if they are
+    const { data: roleData, error: roleError } = await db.supabase
+      .from('user_roles')
+      .select('role')
+      .eq('user_id', userId)
+      .single()
+
+    let allWithdrawals = [...(regularWithdrawals || []).map(w => ({ ...w, is_influencer: false }))]
+
+    // Only fetch influencer withdrawals if user has the influencer role
+    if (!roleError && roleData && roleData.role === 'influencer') {
+      const { data: influencerWithdrawals, error: influencerError } = await db.supabase
+        .from('influencer_withdrawals')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+
+      if (!influencerError && influencerWithdrawals) {
+        // Map influencer withdrawals to match withdrawal_requests format
+        const mapped = influencerWithdrawals.map(w => {
+          // Determine status mapping: 'sent' is success for influencer
+          let mappedStatus = w.status
+          if (w.status === 'sent') mappedStatus = 'completed'
+          
+          return {
+            id: w.id,
+            user_id: w.user_id,
+            amount_usd: w.amount_usd,
+            amount_kes: w.amount_usd * 130, // Approximate KES amount
+            phone: null,
+            status: mappedStatus,
+            transaction_id: null,
+            reviewed_at: w.simulated_at || null,
+            reviewed_by: w.simulated_by || null,
+            approved_at: w.simulated_at || null,
+            completed_at: w.status === 'sent' ? w.simulated_at || w.created_at : null,
+            notes: w.notes || null,
+            created_at: w.created_at,
+            is_influencer: true,
+            original_status: w.status,
+          }
+        })
+        
+        allWithdrawals = [...allWithdrawals, ...mapped]
+      }
+    }
+
+    // Sort by created_at descending
+    allWithdrawals.sort((a, b) => 
+      new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    )
+
+    res.json({ success: true, data: { withdrawals: allWithdrawals } })
+  } catch (err) {
+    console.error('[Wallet] Error fetching withdrawals:', err)
+    next(err)
+  }
 }
 
 // ── KYC Upload ─────────────────────────────────────────────────────

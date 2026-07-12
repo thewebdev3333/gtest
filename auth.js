@@ -52,6 +52,17 @@ async function getMe(req, res, next) {
     ])
 
     const kycStatus = kycSub.data?.status || 'none'
+    
+    // Get display name from user metadata using the user's own token
+    let displayName = req.user.email?.split('@')[0] || 'User'
+    try {
+      const { data: userData, error: userError } = await supabaseAuth.auth.getUser(req.token)
+      if (!userError && userData?.user?.user_metadata?.display_name) {
+        displayName = userData.user.user_metadata.display_name
+      }
+    } catch (err) {
+      console.warn('[getMe] Could not fetch user metadata:', err.message)
+    }
 
     res.json({
       success: true,
@@ -59,6 +70,7 @@ async function getMe(req, res, next) {
         user: {
           id: req.user.id,
           email: req.user.email,
+          displayName: displayName,
         },
         accounts,
         kycStatus,
@@ -71,12 +83,33 @@ async function getMe(req, res, next) {
 async function updateProfile(req, res, next) {
   try {
     const { name } = req.body
-    const { error } = await db.supabase.auth.admin.updateUserById(req.user.id, {
-      user_metadata: { display_name: name },
-    })
+    
+    // Update user metadata using admin API
+    const { data, error } = await supabaseAuth.auth.admin.updateUserById(
+      req.user.id,
+      {
+        user_metadata: { display_name: name },
+      }
+    )
+    
     if (error) throw error
-    res.json({ success: true, data: { message: 'Profile updated.' } })
-  } catch (err) { next(err) }
+    
+    // Return the updated user data with display name
+    res.json({ 
+      success: true, 
+      data: { 
+        message: 'Profile updated.',
+        user: {
+          id: req.user.id,
+          email: req.user.email,
+          displayName: data.user.user_metadata?.display_name || name,
+        }
+      } 
+    })
+  } catch (err) { 
+    console.error('[Profile Update] Error:', err)
+    next(err) 
+  }
 }
 
 async function getKycStatus(userId) {
@@ -88,4 +121,49 @@ async function getKycStatus(userId) {
   return data?.status || 'none'
 }
 
-module.exports = { onSignup, getMe, updateProfile, getKycStatus }
+// Get user profile with display name - simpler approach with fallback
+async function getProfile(req, res, next) {
+  try {
+    // Try to get the user data from the authenticated client
+    let displayName = req.user.email?.split('@')[0] || 'User'
+    
+    try {
+      // Attempt to get the full user data with metadata
+      const { data, error } = await supabaseAuth.auth.getUser(req.token)
+      if (!error && data?.user?.user_metadata?.display_name) {
+        displayName = data.user.user_metadata.display_name
+      }
+    } catch (err) {
+      // If this fails, just use the email-based name
+      console.warn('[getProfile] Could not fetch user metadata, using email fallback:', err.message)
+    }
+    
+    res.json({
+      success: true,
+      data: {
+        id: req.user.id,
+        email: req.user.email,
+        displayName: displayName,
+      }
+    })
+  } catch (err) {
+    console.error('[getProfile] Error:', err)
+    // Always return a success response with fallback data
+    res.json({
+      success: true,
+      data: {
+        id: req.user.id,
+        email: req.user.email,
+        displayName: req.user.email?.split('@')[0] || 'User',
+      }
+    })
+  }
+}
+
+module.exports = { 
+  onSignup, 
+  getMe, 
+  updateProfile, 
+  getKycStatus,
+  getProfile
+}
