@@ -250,13 +250,18 @@
                     // Store token
                     sessionStorage.setItem('gwave_admin_token', data.data.token);
                     sessionStorage.setItem('gwave_admin_user', JSON.stringify(data.data.user));
-                    
-                    toast('Welcome admin!', 'success');
+
+                    // This form is shared by admins and influencers (see
+                    // server.js /admin/login) — route each to their own page.
+                    const role = data.data.user.role;
+                    const destination = role === 'influencer' ? '/admin/influencer.html' : '/admin/dashboard.html';
+
+                    toast(role === 'influencer' ? 'Welcome!' : 'Welcome admin!', 'success');
                     msg.innerHTML = '<div class="success">Login successful! Redirecting...</div>';
                     
-                    // ✅ FIX: Redirect to dashboard with token in URL as fallback
+                    // ✅ FIX: Redirect with token in URL as fallback
                     setTimeout(() => {
-                        window.location.href = `/admin/dashboard.html?token=${data.data.token}`;
+                        window.location.href = `${destination}?token=${data.data.token}`;
                     }, 500);
                 } else {
                     throw new Error(data.error || 'Login failed');
@@ -271,15 +276,23 @@
             }
         }
 
-        // Check if already logged in
+        // Check if already logged in. The stored user's role decides which
+        // endpoint proves the token is still valid and where to send them —
+        // /admin/stats is admin-only and would 403 an influencer's token
+        // every time, wrongly logging them out.
         const token = sessionStorage.getItem('gwave_admin_token');
-        if (token) {
-            fetch(`${API_URL}/admin/stats`, {
+        const storedUser = JSON.parse(sessionStorage.getItem('gwave_admin_user') || 'null');
+        if (token && storedUser) {
+            const isInfluencer = storedUser.role === 'influencer';
+            const checkUrl = isInfluencer ? '/influencer/balance' : '/admin/stats';
+            const destination = isInfluencer ? '/admin/influencer.html' : '/admin/dashboard.html';
+
+            fetch(`${API_URL}${checkUrl}`, {
                 headers: { 'Authorization': `Bearer ${token}` }
             })
             .then(res => {
                 if (res.ok) {
-                    window.location.href = '/admin/dashboard.html';
+                    window.location.href = destination;
                 } else {
                     sessionStorage.removeItem('gwave_admin_token');
                     sessionStorage.removeItem('gwave_admin_user');

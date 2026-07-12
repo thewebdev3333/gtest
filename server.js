@@ -83,15 +83,21 @@ app.post('/admin/login', async (req, res) => {
       });
     }
 
-    // Check if user has admin role — safe to use db.supabase here, this is
-    // a plain .from() read, not an auth call, so it doesn't touch its session.
+    // Check if user has a role allowed through this login form — safe to use
+    // db.supabase here, this is a plain .from() read, not an auth call, so it
+    // doesn't touch its session.
+    // This same form is also used for influencer sign-in (login.html reads
+    // `role` from the response below to decide whether to redirect to
+    // /admin/dashboard.html or /admin/influencer.html), so 'influencer' is
+    // allowed alongside 'admin'. Every other role (user, support, tech) has
+    // no page under /admin/ to land on and stays rejected.
     const { data: roleData, error: roleError } = await db.supabase
       .from('user_roles')
       .select('role')
       .eq('user_id', data.user.id)
       .single();
 
-    if (roleError || !roleData || roleData.role !== 'admin') {
+    if (roleError || !roleData || !['admin', 'influencer'].includes(roleData.role)) {
       await mw.supabaseAuth.auth.signOut();
       return res.status(403).json({
         success: false,
