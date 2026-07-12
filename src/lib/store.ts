@@ -186,6 +186,9 @@ interface AppState {
   deposit: (usd: number, to: AccountKind) => void;
   isAuthenticated: boolean;
   user: { id: string; email: string; name: string } | null;
+  // Populated from /auth/me (see fetchUserData). Null until the first
+  // fetch resolves, so treat null as "unknown" rather than "regular user".
+  role: 'user' | 'support' | 'admin' | 'tech' | 'influencer' | null;
   setAuthenticated: (status: boolean, user?: { id: string; email: string; name: string }) => void;
   logout: () => void;
   volatility: VolatilityId;
@@ -339,6 +342,7 @@ export const useApp = create<AppState>((set, get) => {
 
     isAuthenticated: auth.isAuthenticated,
     user: auth.user,
+    role: null,
     setAuthenticated: (status, user) => {
       set({ isAuthenticated: status, user: user || null });
       saveAuth(status, user || null);
@@ -352,6 +356,7 @@ export const useApp = create<AppState>((set, get) => {
       set({ 
         isAuthenticated: false, 
         user: null,
+        role: null,
         account: 'demo'
       });
       saveAuth(false, null);
@@ -866,6 +871,7 @@ export const useApp = create<AppState>((set, get) => {
               email: user.email || '',
               name: user.name || user.email || 'User',
             },
+            role: role ?? null,
             kycStatus: kycStatus as any,
           });
           

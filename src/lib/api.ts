@@ -98,7 +98,7 @@ export interface AuthResponse {
       total_pl: number
     }>
     kycStatus: 'none' | 'pending' | 'approved' | 'rejected'
-    role: 'user' | 'support' | 'admin'
+    role: 'user' | 'support' | 'admin' | 'tech' | 'influencer'
   }
 }
 
@@ -278,6 +278,59 @@ export async function getWithdrawals(): Promise<{
   data: { withdrawals: WithdrawalRequest[] }
 }> {
   return apiFetch('/wallet/withdrawals')
+}
+
+// ── Influencer Withdrawal API ─────────────────────────────────────
+// Influencer accounts use a separate mock withdrawal flow (see
+// influencer.js on the backend) — no M-Pesa phone number, no idempotency
+// key, and the balance is deducted immediately with status 'pending'
+// until an admin later marks it 'sent' or 'failed'.
+
+export interface InfluencerBalanceResponse {
+  success: true
+  data: {
+    balance: number
+    totalWithdrawn: number
+    pendingWithdrawn: number
+    sentWithdrawn: number
+  }
+}
+
+export async function getInfluencerBalance(): Promise<InfluencerBalanceResponse> {
+  return apiFetch<InfluencerBalanceResponse>('/influencer/balance')
+}
+
+export interface InfluencerWithdrawal {
+  id: string
+  amount_usd: string
+  status: 'pending' | 'sent' | 'failed'
+  created_at: string
+}
+
+export async function getInfluencerWithdrawals(): Promise<{
+  success: true
+  data: { withdrawals: InfluencerWithdrawal[] }
+}> {
+  return apiFetch('/influencer/withdrawals')
+}
+
+export interface InfluencerWithdrawResponse {
+  success: true
+  data: {
+    withdrawalId: string
+    message: string
+    status: string
+    newBalance: number
+  }
+}
+
+export async function requestInfluencerWithdrawal(
+  amountUSD: number
+): Promise<InfluencerWithdrawResponse> {
+  return apiFetch<InfluencerWithdrawResponse>('/influencer/withdraw', {
+    method: 'POST',
+    body: JSON.stringify({ amountUSD }),
+  })
 }
 
 // ── KYC API ──────────────────────────────────────────────────────

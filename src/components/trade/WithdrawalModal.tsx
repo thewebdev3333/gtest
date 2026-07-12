@@ -1,12 +1,12 @@
 // src/components/trade/WithdrawalModal.tsx
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { useApp, formatMoney } from "@/lib/store";
-import { withdrawMpesa, ApiError } from "@/lib/api";
+import { withdrawMpesa, requestInfluencerWithdrawal, ApiError } from "@/lib/api";
 
 interface WithdrawalModalProps {
   open: boolean;
@@ -23,6 +23,19 @@ export function WithdrawalModal({ open, onOpenChange, onWithdrawn }: WithdrawalM
   const fxRate = useApp((s) => s.fxRate);
   const account = useApp((s) => s.account);
   const fetchBalances = useApp((s) => s.fetchBalances);
+  const role = useApp((s) => s.role);
+  const isInfluencer = role === "influencer";
+
+  // Whatever's already in the store might be stale (or never fetched at
+  // all in this session), and the "Insufficient balance" check and the
+  // displayed "Available Balance" both rely on it — so pull a fresh
+  // number every time the modal is opened rather than trusting whatever
+  // happens to already be in state.
+  useEffect(() => {
+    if (open) {
+      fetchBalances();
+    }
+  }, [open]);
 
   const handleWithdraw = async () => {
     const usdAmount = Number(amount);
@@ -52,15 +65,22 @@ export function WithdrawalModal({ open, onOpenChange, onWithdrawn }: WithdrawalM
     setSubmitting(true);
 
     try {
-      // Each submission gets its own key so a retried/duplicated click can't
-      // create two withdrawal requests, but it's scoped to this call only —
-      // never reused across other actions (e.g. a deposit).
-      const idempotencyKey = crypto.randomUUID();
-      const response = await withdrawMpesa(cleanedPhone, usdAmount, idempotencyKey);
+      if (isInfluencer) {
+        // Same UI and validation as everyone else, but influencer accounts
+        // route to the mock withdrawal flow (see influencer.js) instead of
+        // the real M-Pesa endpoint. The phone number is collected for a
+        // consistent demo experience but isn't part of this endpoint's
+        // request — the mock flow only needs the amount.
+        await requestInfluencerWithdrawal(usdAmount);
+      } else {
+        // Each submission gets its own key so a retried/duplicated click can't
+        // create two withdrawal requests, but it's scoped to this call only —
+        // never reused across other actions (e.g. a deposit).
+        const idempotencyKey = crypto.randomUUID();
+        await withdrawMpesa(cleanedPhone, usdAmount, idempotencyKey);
+      }
 
-      toast.success("Withdrawal request submitted!", {
-        description: `$${usdAmount.toFixed(2)} is pending review. You'll be notified when it's processed.`,
-      });
+      toast.success("Withdrawal request submitted!");
 
       // The balance was already deducted server-side the moment the request
       // was accepted, so refresh now instead of waiting for the eventual
@@ -79,7 +99,7 @@ export function WithdrawalModal({ open, onOpenChange, onWithdrawn }: WithdrawalM
           toast.error("You already have a withdrawal request pending review.");
         } else if (err.code === "RATE_LIMITED") {
           toast.error("Maximum 3 withdrawals per day.");
-        } else if (err.code === "INSUFFICIENT_BALANCE") {
+        } else if (err.code === "INSUFFICIENT_BALANCE" || err.code === "NOT_FOUND") {
           toast.error("Insufficient balance.");
         } else {
           toast.error(err.message || "Withdrawal request failed. Please try again.");
