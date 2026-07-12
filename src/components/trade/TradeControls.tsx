@@ -72,8 +72,10 @@ export function TradeControls() {
   const dirs = directionOptions(contract);
   const [direction, setDirection] = useState<Direction>(dirs[0].id);
   const [unit, setUnit] = useState<DurationUnit>(contract === "match_differ" ? "ticks" : "seconds");
-  const [durationVal, setDurationVal] = useState<number>(10);
-  const [stake, setStake] = useState<number>(5);
+  // ✅ Allow empty string for duration
+  const [durationVal, setDurationVal] = useState<number | string>(10);
+  // ✅ Allow empty string for stake
+  const [stake, setStake] = useState<number | string>(5);
   const [barrier, setBarrier] = useState<number>(0);
   const [payout, setPayout] = useState<number>(0);
   const [payoutLoading, setPayoutLoading] = useState<boolean>(false);
@@ -84,25 +86,31 @@ export function TradeControls() {
 
   const isNegative = NEGATIVE_DIRECTIONS.includes(direction);
 
-  // ✅ Instant client-side estimate — updates immediately, with no network
-  // round trip, using the same multipliers as the backend (kept in sync
-  // in store.ts). This is a preview only; the actual payout used for the
-  // trade is always calculated and enforced server-side in /trade/place.
+  // Instant client-side estimate
   useEffect(() => {
     const digit = (contract === 'over_under' || contract === 'match_differ') ? barrier : undefined;
-    setPayout(estimatePayout(contract, stake, direction, digit));
+    // ✅ Only calculate if stake is valid
+    const stakeNum = typeof stake === 'string' ? Number(stake) : stake;
+    if (stakeNum && stakeNum > 0) {
+      setPayout(estimatePayout(contract, stakeNum, direction, digit));
+    } else {
+      setPayout(0);
+    }
   }, [contract, stake, direction, barrier]);
 
-  // Debounced authoritative fetch — corrects the instant estimate above
-  // in the rare case the backend's live multipliers ever diverge from
-  // the client's copy.
+  // Debounced authoritative fetch
   useEffect(() => {
     let cancelled = false;
     setPayoutLoading(true);
     const t = setTimeout(async () => {
       try {
         const digit = (contract === 'over_under' || contract === 'match_differ') ? barrier : undefined;
-        const res = await getPayoutPreview(contract, stake, direction, digit);
+        const stakeNum = typeof stake === 'string' ? Number(stake) : stake;
+        if (!stakeNum || stakeNum < 2) {
+          setPayoutLoading(false);
+          return;
+        }
+        const res = await getPayoutPreview(contract, stakeNum, direction, digit);
         if (!cancelled && res.success) setPayout(res.data.potentialPayout);
       } catch {
         // keep the last known (estimated) payout on a transient error
@@ -113,18 +121,42 @@ export function TradeControls() {
     return () => { cancelled = true; clearTimeout(t); };
   }, [contract, stake, direction, barrier]);
 
+  // Get numeric values for calculations
+  const getDurationNum = (): number => {
+    if (durationVal === '') return 0;
+    return typeof durationVal === 'string' ? Number(durationVal) : durationVal;
+  };
+
+  const getStakeNum = (): number => {
+    if (stake === '') return 0;
+    return typeof stake === 'string' ? Number(stake) : stake;
+  };
+
   const buy = async () => {
-    if (stake < 1) {
-      toast.error("Minimum stake is $1");
+    // ✅ Validate duration
+    const durationNum = getDurationNum();
+    if (!durationNum || durationNum < UNIT_MIN[unit]) {
+      toast.error(`Please enter a valid duration (min ${UNIT_MIN[unit]} ${unit})`);
       return;
     }
-    if (stake > balance) {
+    if (durationNum > UNIT_MAX[unit]) {
+      toast.error(`Duration cannot exceed ${UNIT_MAX[unit]} ${unit}`);
+      return;
+    }
+
+    // ✅ Validate stake
+    const stakeNum = getStakeNum();
+    if (!stakeNum || stakeNum < 2) {
+      toast.error("Please enter a valid stake (min $2)");
+      return;
+    }
+    if (stakeNum > balance) {
       toast.error("Insufficient balance");
       return;
     }
 
     try {
-      const durationTicks = durationVal * (unit === 'ticks' ? 1 : unit === 'seconds' ? 1 : unit === 'minutes' ? 60 : 3600);
+      const durationTicks = durationNum * (unit === 'ticks' ? 1 : unit === 'seconds' ? 1 : unit === 'minutes' ? 60 : 3600);
       const cappedDurationTicks = Math.min(durationTicks, 3600);
 
       const response = await placeTrade({
@@ -133,23 +165,17 @@ export function TradeControls() {
         contractType: contract,
         direction,
         selectedDigit: contract === 'over_under' || contract === 'match_differ' ? barrier : undefined,
-        stake,
+        stake: stakeNum,
         durationTicks: cappedDurationTicks,
       });
 
       if (response.success) {
-        // ✅ Optimistic local insert using the data the backend already
-        // returned — the position now appears immediately instead of
-        // waiting on the full syncAll() round trip below. Pass the real
-        // contractId as the second argument so this trade's id matches
-        // the backend contract id (required for settlement/lookup to
-        // find it later).
         openTrade(
           {
             contract,
             direction,
             volatility,
-            stake,
+            stake: stakeNum,
             payout: response.data.potentialPayout,
             durationMs: cappedDurationTicks * 1000,
             entryPrice: response.data.entryPrice,
@@ -158,12 +184,10 @@ export function TradeControls() {
           response.data.contractId,
         );
 
-        toast.success(`Opened ${direction.toUpperCase()} for $${stake.toFixed(2)}`, {
-          description: `Trade #${response.data.contractId.slice(0, 6)} · settles in ${durationVal} ${unit}`,
+        toast.success(`Opened ${direction.toUpperCase()} for $${stakeNum.toFixed(2)}`, {
+          description: `Trade #${response.data.contractId.slice(0, 6)} · settles in ${durationNum} ${unit}`,
         });
 
-        // Background reconciliation only — the UI is already updated
-        // above, so this does not need to be awaited before returning.
         syncAll();
       }
     } catch (err: any) {
@@ -209,7 +233,12 @@ export function TradeControls() {
               onChange={(e) => {
                 const u = e.target.value as DurationUnit;
                 setUnit(u);
-                setDurationVal(Math.min(UNIT_MAX[u], Math.max(UNIT_MIN[u], durationVal)));
+                const currentVal = getDurationNum();
+                if (currentVal) {
+                  setDurationVal(Math.min(UNIT_MAX[u], Math.max(UNIT_MIN[u], currentVal)));
+                } else {
+                  setDurationVal(UNIT_MIN[u]);
+                }
               }}
               className="bg-transparent text-xs text-muted-foreground capitalize outline-none"
             >
@@ -222,24 +251,39 @@ export function TradeControls() {
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setDurationVal((v) => Math.max(UNIT_MIN[unit], v - 1))}
+              onClick={() => {
+                const currentVal = getDurationNum();
+                const newVal = currentVal ? Math.max(UNIT_MIN[unit], currentVal - 1) : UNIT_MIN[unit];
+                setDurationVal(newVal);
+              }}
               className="grid h-7 w-7 place-items-center rounded bg-elevated hover:bg-accent"
             >
               <Minus className="h-4 w-4" />
             </button>
             <Input
               type="number"
-              value={durationVal}
               min={UNIT_MIN[unit]}
               max={UNIT_MAX[unit]}
+              value={durationVal}
               onChange={(e) => {
-                const n = Number(e.target.value);
-                if (Number.isFinite(n)) setDurationVal(Math.min(UNIT_MAX[unit], Math.max(UNIT_MIN[unit], n)));
+                const val = e.target.value;
+                if (val === '') {
+                  setDurationVal(val);
+                  return;
+                }
+                const n = Number(val);
+                if (Number.isFinite(n)) {
+                  setDurationVal(Math.min(UNIT_MAX[unit], Math.max(UNIT_MIN[unit], n)));
+                }
               }}
-              className="w-16 bg-transparent text-center text-2xl font-bold"
+              className="w-16 bg-transparent text-center text-2xl font-bold [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
             />
             <button
-              onClick={() => setDurationVal((v) => Math.min(UNIT_MAX[unit], v + 1))}
+              onClick={() => {
+                const currentVal = getDurationNum();
+                const newVal = currentVal ? Math.min(UNIT_MAX[unit], currentVal + 1) : UNIT_MIN[unit];
+                setDurationVal(newVal);
+              }}
               className="grid h-7 w-7 place-items-center rounded bg-elevated hover:bg-accent"
             >
               <Plus className="h-4 w-4" />
@@ -247,7 +291,7 @@ export function TradeControls() {
           </div>
         </div>
         <div className="mt-1 text-[10px] text-muted-foreground">
-          Max {UNIT_MAX[unit]} {unit}
+          Min {UNIT_MIN[unit]} · Max {UNIT_MAX[unit]} {unit}
         </div>
       </div>
 
@@ -259,7 +303,11 @@ export function TradeControls() {
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setStake((s) => Math.max(2, +(s - 1).toFixed(2)))}
+              onClick={() => {
+                const currentVal = getStakeNum();
+                const newVal = currentVal ? Math.max(2, +(currentVal - 1).toFixed(2)) : 2;
+                setStake(newVal);
+              }}
               className="grid h-7 w-7 place-items-center rounded bg-elevated hover:bg-accent"
             >
               <Minus className="h-4 w-4" />
@@ -272,14 +320,25 @@ export function TradeControls() {
                 step={0.5}
                 value={stake}
                 onChange={(e) => {
-                  const n = Number(e.target.value);
-                  if (Number.isFinite(n)) setStake(Math.max(2, n));
+                  const val = e.target.value;
+                  if (val === '') {
+                    setStake(val);
+                    return;
+                  }
+                  const n = Number(val);
+                  if (Number.isFinite(n)) {
+                    setStake(Math.max(2, n));
+                  }
                 }}
-                className="w-20 bg-transparent text-center text-2xl font-bold"
+                className="w-20 bg-transparent text-center text-2xl font-bold [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
               />
             </div>
             <button
-              onClick={() => setStake((s) => +(s + 1).toFixed(2))}
+              onClick={() => {
+                const currentVal = getStakeNum();
+                const newVal = currentVal ? +(currentVal + 1).toFixed(2) : 3;
+                setStake(newVal);
+              }}
               className="grid h-7 w-7 place-items-center rounded bg-elevated hover:bg-accent"
             >
               <Plus className="h-4 w-4" />

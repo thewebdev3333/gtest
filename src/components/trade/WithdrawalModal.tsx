@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { useApp, formatMoney } from "@/lib/store";
+import { withdrawMpesa, ApiError } from "@/lib/api";
 
 interface WithdrawalModalProps {
   open: boolean;
@@ -15,15 +16,17 @@ interface WithdrawalModalProps {
 
 export function WithdrawalModal({ open, onOpenChange, onWithdrawn }: WithdrawalModalProps) {
   const [amount, setAmount] = useState("");
+  const [phone, setPhone] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const realBalance = useApp((s) => s.realBalance);
   const currency = useApp((s) => s.currency);
   const fxRate = useApp((s) => s.fxRate);
   const account = useApp((s) => s.account);
+  const fetchBalances = useApp((s) => s.fetchBalances);
 
   const handleWithdraw = async () => {
     const usdAmount = Number(amount);
-    
+
     if (!Number.isFinite(usdAmount) || usdAmount <= 0) {
       toast.error("Please enter a valid amount");
       return;
@@ -39,19 +42,54 @@ export function WithdrawalModal({ open, onOpenChange, onWithdrawn }: WithdrawalM
       return;
     }
 
+    const cleanedPhone = phone.replace(/\s/g, "");
+    const validPhone = /^(07\d{8}|01\d{8}|2547\d{8}|2541\d{8}|7\d{8}|1\d{8})$/.test(cleanedPhone);
+    if (!validPhone) {
+      toast.error("Enter a valid M-Pesa number, e.g. 07XXXXXXXX or 01XXXXXXXX");
+      return;
+    }
+
     setSubmitting(true);
-    
-    // Simulate withdrawal request
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    
-    toast.success("Withdrawal request submitted for review!", {
-      description: `$${usdAmount.toFixed(2)} will be processed within 1-2 business days.`,
-    });
-    
-    setSubmitting(false);
-    onOpenChange(false);
-    setAmount("");
-    onWithdrawn?.();
+
+    try {
+      // Each submission gets its own key so a retried/duplicated click can't
+      // create two withdrawal requests, but it's scoped to this call only —
+      // never reused across other actions (e.g. a deposit).
+      const idempotencyKey = crypto.randomUUID();
+      const response = await withdrawMpesa(cleanedPhone, usdAmount, idempotencyKey);
+
+      toast.success("Withdrawal request submitted!", {
+        description: `$${usdAmount.toFixed(2)} is pending review. You'll be notified when it's processed.`,
+      });
+
+      // The balance was already deducted server-side the moment the request
+      // was accepted, so refresh now instead of waiting for the eventual
+      // "completed" websocket event.
+      await fetchBalances();
+
+      setAmount("");
+      setPhone("");
+      onOpenChange(false);
+      onWithdrawn?.();
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.code === "KYC_REQUIRED") {
+          toast.error("KYC verification required for withdrawals over $100.");
+        } else if (err.code === "PENDING_WITHDRAWAL") {
+          toast.error("You already have a withdrawal request pending review.");
+        } else if (err.code === "RATE_LIMITED") {
+          toast.error("Maximum 3 withdrawals per day.");
+        } else if (err.code === "INSUFFICIENT_BALANCE") {
+          toast.error("Insufficient balance.");
+        } else {
+          toast.error(err.message || "Withdrawal request failed. Please try again.");
+        }
+      } else {
+        toast.error("Withdrawal request failed. Please try again.");
+      }
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -86,6 +124,17 @@ export function WithdrawalModal({ open, onOpenChange, onWithdrawn }: WithdrawalM
             <p className="text-xs text-muted-foreground">
               Minimum withdrawal: $10 · Withdrawals are processed within 1-2 business days
             </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="withdraw-phone">M-Pesa Phone Number</Label>
+            <Input
+              id="withdraw-phone"
+              type="tel"
+              placeholder="07XXXXXXXX"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+            />
           </div>
 
           <div className="space-y-2">

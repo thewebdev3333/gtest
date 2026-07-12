@@ -48,10 +48,10 @@ export function DepositModal({
     }
 
     const kesAmount = Math.round(usdAmount * fxRate);
-    if (kesAmount < 260) {
-      toast.error(`Minimum deposit is KES ${Math.round(260)} (~$2)`);
-      return;
-    }
+      if (kesAmount < 520) {  // Changed from 260
+        toast.error(`Minimum deposit is KES ${Math.round(520)} (~$4)`);  // Updated message
+        return;
+      }
 
     setSubmitting(true);
     

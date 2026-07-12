@@ -215,7 +215,8 @@ function WalletPage() {
     }
   };
 
-  const canWithdraw = kycStatus === 'approved' && realBalance > 0;
+  // Only KYC required for amounts over $100
+const canWithdraw = realBalance > 0;
 
   return (
     <AuthGuard>
@@ -272,7 +273,7 @@ function WalletPage() {
               </div>
               {kycStatus !== 'approved' && realBalance > 0 && (
                 <p className="mt-2 text-xs text-yellow-500">
-                  ⚠️ KYC verification required for withdrawals
+                  ⚠️ KYC verification required for withdrawals above $100
                 </p>
               )}
             </Card>
@@ -389,6 +390,7 @@ function WalletPage() {
             )}
           </Card>
 
+
           {withdrawals.length > 0 && (
             <Card className="p-5">
               <h2 className="mb-3 font-semibold">Withdrawal Requests</h2>
@@ -403,13 +405,14 @@ function WalletPage() {
                     </div>
                     <div className="text-right">
                       <div>{formatMoney(parseFloat(w.amount_usd), currency, fxRate)}</div>
+                      {/* ✅ CHANGED: Show "Pending" instead of "pending_review" */}
                       <div className={`text-xs ${
                         w.status === 'completed' ? 'text-primary' : 
                         w.status === 'pending_review' ? 'text-yellow-500' : 
                         w.status === 'rejected' || w.status === 'failed' ? 'text-destructive' :
                         'text-muted-foreground'
                       }`}>
-                        {w.status.replace('_', ' ')}
+                        {w.status === 'pending_review' ? 'Pending' : w.status.replace('_', ' ')}
                       </div>
                     </div>
                   </div>

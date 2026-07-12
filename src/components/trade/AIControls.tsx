@@ -80,20 +80,27 @@ export function AIControls() {
   const [decisionHistory, setDecisionHistory] = useState<AIDecision[]>([]);
   const [pendingDecision, setPendingDecision] = useState<AIDecision | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
-  // ✅ NEW: which contract the AI is restricted to ('auto' = AI picks any
-  // contract; otherwise the AI only considers that contract type and picks
-  // the best-scoring volatility/direction/barrier within it).
   const [lockedContract, setLockedContract] = useState<LockedContract>('auto');
-  // ✅ NEW: trade duration in seconds, adjustable, defaults to a short 5s.
-  const [durationSeconds, setDurationSeconds] = useState(DEFAULT_DURATION_SECONDS);
-  // ✅ NEW: manual stake override. null = use the AI's suggested stake
-  // (itself now drawn from the risk tier's default range in STAKE_RANGES).
-  const [stakeOverride, setStakeOverride] = useState<number | null>(null);
+  // ✅ Allow empty string for duration
+  const [durationSeconds, setDurationSeconds] = useState<number | string>(DEFAULT_DURATION_SECONDS);
+  // ✅ Allow empty string for stake override
+  const [stakeOverride, setStakeOverride] = useState<number | string | null>(null);
   const analysisIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isMountedRef = useRef(true);
 
   const balance = account === "demo" ? demoBalance : realBalance;
   const isAutoRunning = autoTrade.isRunning;
+
+  // ── Helper: get numeric values ──
+  const getDurationNum = (): number => {
+    if (durationSeconds === '') return 0;
+    return typeof durationSeconds === 'string' ? Number(durationSeconds) : durationSeconds;
+  };
+
+  const getStakeOverrideNum = (): number | null => {
+    if (stakeOverride === null || stakeOverride === '') return null;
+    return typeof stakeOverride === 'string' ? Number(stakeOverride) : stakeOverride;
+  };
 
   // ── Cleanup on unmount ─────────────────────────────────────────
 
@@ -157,31 +164,27 @@ export function AIControls() {
         setDecision(decision);
         setPendingDecision(decision);
         setVolatility(decision.symbol);
-        // ✅ NEW: reset any prior manual override so the stake input shows
+        // Reset any prior manual override so the stake input shows
         // this decision's own suggestion by default.
         setStakeOverride(null);
         console.log('[AI] Decision made:', decision);
         
-        // ✅ FIX: Only show toast if NOT auto-executing (auto-execute handles its own feedback)
         if (!autoExecute) {
           toast.info(`AI recommends ${decision.symbol} ${CONTRACT_LABELS[decision.contract]} ${decision.direction.toUpperCase()}`, {
             description: `Confidence: ${decision.confidence.toFixed(0)}% · EV: $${decision.expectedValue.toFixed(2)} per $1`,
             duration: 5000,
           });
         } else {
-          // ✅ FIX: Auto-execute immediately if enabled
           executeDecision(decision);
         }
       } else {
         setDecision(null);
         setPendingDecision(null);
-        // Only show "no opportunity" toast if we're not running continuously
         if (!aiRunning) {
           toast.info('AI analysis complete — No clear opportunity found');
         }
       }
       
-      // Update performance
       setPerformance(engine.getPerformance());
       setDecisionHistory(engine.getDecisionHistory(10));
       
@@ -207,13 +210,28 @@ export function AIControls() {
 
     if (isExecuting) return;
 
+    // ✅ Validate duration
+    const durationNum = getDurationNum();
+    if (!durationNum || durationNum < MIN_DURATION_SECONDS || durationNum > MAX_DURATION_SECONDS) {
+      toast.error(`Please enter a valid duration (${MIN_DURATION_SECONDS}-${MAX_DURATION_SECONDS} seconds)`);
+      return;
+    }
+
+    // ✅ Validate stake
+    const overrideNum = getStakeOverrideNum();
+    const stake = overrideNum ?? decisionToExecute.suggestedStake;
+    if (!stake || stake < 0.5) {
+      toast.error('Please enter a valid stake amount (min $0.50)');
+      return;
+    }
+    if (stake > balance * 0.5) {
+      toast.error(`Stake cannot exceed half of your balance (${formatMoney(balance * 0.5, currency, fxRate)})`);
+      return;
+    }
+
     setIsExecuting(true);
 
     try {
-      // ✅ CHANGED: honor a manual stake override if the person set one,
-      // otherwise fall back to the AI's suggested stake (drawn from the
-      // risk tier's default range).
-      const stake = stakeOverride ?? decisionToExecute.suggestedStake;
       const stopLoss = decisionToExecute.suggestedStopLoss;
       const takeProfit = decisionToExecute.suggestedTakeProfit;
 
@@ -224,9 +242,7 @@ export function AIControls() {
         return;
       }
 
-      // ✅ CHANGED: duration is now adjustable (default 5s) instead of a
-      // hardcoded 60s.
-      const durationMs = durationSeconds * 1000;
+      const durationMs = durationNum * 1000;
 
       // Start auto-trade with AI's recommendation
       startAutoTrade({
@@ -238,7 +254,7 @@ export function AIControls() {
         takeProfit: takeProfit,
         durationMs,
         durationUnit: 'seconds',
-        durationVal: durationSeconds,
+        durationVal: durationNum,
         barrier: decisionToExecute.barrier,
         aiDecision: decisionToExecute,
       });
@@ -248,7 +264,6 @@ export function AIControls() {
         duration: 5000,
       });
 
-      // ✅ FIX: Clear pending decision after execution
       setPendingDecision(null);
       setDecision(null);
 
@@ -260,7 +275,7 @@ export function AIControls() {
         setIsExecuting(false);
       }
     }
-  }, [balance, startAutoTrade, currency, fxRate, isAutoRunning, isExecuting, stakeOverride, durationSeconds]);
+  }, [balance, startAutoTrade, currency, fxRate, isAutoRunning, isExecuting]);
 
   // ── Authorize pending decision ──────────────────────────────────
 
@@ -292,9 +307,7 @@ export function AIControls() {
       toast.info('AI bot stopped');
     } else {
       setAiRunning(true);
-      // Run immediately
       runAnalysis();
-      // Then every 30 seconds
       analysisIntervalRef.current = setInterval(runAnalysis, 30000);
       toast.info('AI bot started — analyzing markets...');
     }
@@ -308,7 +321,6 @@ export function AIControls() {
     
     for (const trade of settledTrades) {
       const history = (engine as any).tradeHistory || [];
-      // ✅ FIX: Use trade ID for deduplication
       const alreadyRecorded = history.some((h: any) => h.id === trade.id);
       if (!alreadyRecorded && trade.pnl !== undefined) {
         engine.recordTradeOutcome(
@@ -332,7 +344,6 @@ export function AIControls() {
   // ── Initial analysis on mount ──────────────────────────────────
 
   useEffect(() => {
-    // Delay initial analysis slightly to allow the store to hydrate
     const timer = setTimeout(() => {
       if (isMountedRef.current) {
         runAnalysis();
@@ -366,10 +377,26 @@ export function AIControls() {
     }
   };
 
-  // Calculate win rate from performance
   const winRate = performance && performance.totalDecisions > 0
     ? (performance.wins / performance.totalDecisions) * 100
     : 0;
+
+  // ── Get the effective stake to display ──
+  const getEffectiveStake = (): number => {
+    const override = getStakeOverrideNum();
+    if (override !== null && override > 0) return override;
+    if (pendingDecision) return pendingDecision.suggestedStake;
+    if (decision) return decision.suggestedStake;
+    return (STAKE_RANGES[riskTolerance][0] + STAKE_RANGES[riskTolerance][1]) / 2;
+  };
+
+  // ── Get the current stake value for the input ──
+  const getStakeInputValue = (): string | number => {
+    if (stakeOverride !== null && stakeOverride !== '') return stakeOverride;
+    if (pendingDecision) return pendingDecision.suggestedStake;
+    if (decision) return decision.suggestedStake;
+    return (STAKE_RANGES[riskTolerance][0] + STAKE_RANGES[riskTolerance][1]) / 2;
+  };
 
   return (
     <div className="space-y-4">
@@ -460,9 +487,7 @@ export function AIControls() {
         </div>
       </div>
 
-      {/* ✅ NEW: Contract lock — 'Auto' lets the AI pick any contract type;
-          otherwise it only considers the chosen contract and picks the
-          best-scoring volatility/direction/barrier within it. */}
+      {/* Contract lock */}
       <div>
         <div className="flex items-center justify-between mb-1">
           <Label className="text-xs text-muted-foreground">Contract</Label>
@@ -488,13 +513,13 @@ export function AIControls() {
         </div>
       </div>
 
-      {/* ✅ NEW: Adjustable trade duration, defaults to a short 5 seconds */}
+      {/* Trade Duration */}
       <div>
         <div className="flex items-center justify-between mb-1">
           <Label htmlFor="duration-seconds" className="text-xs text-muted-foreground">
             Trade Duration
           </Label>
-          <span className="text-xs font-medium">{durationSeconds}s</span>
+          <span className="text-xs font-medium">{getDurationNum() || 0}s</span>
         </div>
         <input
           id="duration-seconds"
@@ -505,28 +530,28 @@ export function AIControls() {
           value={durationSeconds}
           disabled={isAutoRunning}
           onChange={(e) => {
-            const val = parseInt(e.target.value, 10);
-            if (Number.isNaN(val)) return;
-            const clamped = Math.min(MAX_DURATION_SECONDS, Math.max(MIN_DURATION_SECONDS, val));
-            setDurationSeconds(clamped);
+            const val = e.target.value;
+            if (val === '') {
+              setDurationSeconds(val);
+              return;
+            }
+            const num = Number(val);
+            if (Number.isFinite(num)) {
+              setDurationSeconds(Math.min(MAX_DURATION_SECONDS, Math.max(MIN_DURATION_SECONDS, num)));
+            }
           }}
-          className="w-full rounded-md bg-elevated border border-border px-2 py-1.5 text-xs disabled:opacity-50"
+          className="w-full rounded-md bg-elevated border border-border px-2 py-1.5 text-xs disabled:opacity-50 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
         />
       </div>
 
-      {/* ✅ NEW: Manual stake override — pre-filled with the AI's suggested
-          stake for the current decision, editable at any time. */}
+      {/* Stake Override */}
       <div>
         <div className="flex items-center justify-between mb-1">
           <Label htmlFor="stake-override" className="text-xs text-muted-foreground">
             Stake
           </Label>
           <span className="text-xs font-medium">
-            {formatMoney(
-              stakeOverride ?? pendingDecision?.suggestedStake ?? (STAKE_RANGES[riskTolerance][0] + STAKE_RANGES[riskTolerance][1]) / 2,
-              currency,
-              fxRate
-            )}
+            {formatMoney(getEffectiveStake(), currency, fxRate)}
           </span>
         </div>
         <input
@@ -535,13 +560,21 @@ export function AIControls() {
           min={0.5}
           step={0.5}
           disabled={isAutoRunning}
-          value={stakeOverride ?? pendingDecision?.suggestedStake ?? (STAKE_RANGES[riskTolerance][0] + STAKE_RANGES[riskTolerance][1]) / 2}
+          value={getStakeInputValue()}
           onChange={(e) => {
-            const val = parseFloat(e.target.value);
-            if (Number.isNaN(val)) return;
-            setStakeOverride(Math.max(0.5, val));
+            const val = e.target.value;
+            if (val === '') {
+              setStakeOverride(val);
+              return;
+            }
+            const num = Number(val);
+            if (Number.isFinite(num) && num > 0) {
+              setStakeOverride(num);
+            } else if (num === 0) {
+              setStakeOverride(0);
+            }
           }}
-          className="w-full rounded-md bg-elevated border border-border px-2 py-1.5 text-xs disabled:opacity-50"
+          className="w-full rounded-md bg-elevated border border-border px-2 py-1.5 text-xs disabled:opacity-50 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
         />
       </div>
 
@@ -584,7 +617,7 @@ export function AIControls() {
                 )}
                 <div>• Volatility: {pendingDecision.reasoning.volatility}</div>
                 <div>• Trend: {pendingDecision.reasoning.trend}</div>
-                <div className="text-primary">• Stake: {formatMoney(stakeOverride ?? pendingDecision.suggestedStake, currency, fxRate)}</div>
+                <div className="text-primary">• Stake: {formatMoney(getEffectiveStake(), currency, fxRate)}</div>
               </div>
             </div>
           </div>

@@ -16,18 +16,17 @@ const UNIT_LABELS: Record<DurationUnit, string> = {
 };
 
 const UNIT_TO_MS: Record<DurationUnit, number> = {
-  ticks: 1000,    // 1 tick = 1 second
+  ticks: 1000,
   seconds: 1000,
   minutes: 60000,
   hours: 3600000,
 };
 
-// ✅ Expanded ranges for more flexibility
 const UNIT_MAX: Record<DurationUnit, number> = {
-  ticks: 100,     // 100 ticks = 100 seconds = 1.67 minutes
-  seconds: 300,   // 5 minutes
-  minutes: 60,    // 60 minutes = 1 hour
-  hours: 24,      // 24 hours
+  ticks: 100,
+  seconds: 300,
+  minutes: 60,
+  hours: 24,
 };
 
 const UNIT_MIN: Record<DurationUnit, number> = {
@@ -76,16 +75,37 @@ export function AutoTradeControls() {
   const [direction, setDirection] = useState<Direction>("rise");
   const [contract, setContractLocal] = useState<ContractType>("rise_fall");
   const [durationUnit, setDurationUnit] = useState<DurationUnit>("seconds");
-  const [durationVal, setDurationVal] = useState<number>(30);
-  const [stake, setStake] = useState<number>(5);
-  const [stopLoss, setStopLoss] = useState<number>(20);
-  const [takeProfit, setTakeProfit] = useState<number>(10);
+  // ✅ Allow empty strings
+  const [durationVal, setDurationVal] = useState<number | string>(30);
+  const [stake, setStake] = useState<number | string>(5);
+  const [stopLoss, setStopLoss] = useState<number | string>(20);
+  const [takeProfit, setTakeProfit] = useState<number | string>(10);
   const [barrier, setBarrier] = useState<number>(5);
 
   const balance = account === "demo" ? demoBalance : realBalance;
   const isRunning = autoTrade.isRunning;
 
   const allowedUnits = ALLOWED_UNITS[contract] || ["ticks"];
+
+  const getDurationNum = (): number => {
+    if (durationVal === '') return 0;
+    return typeof durationVal === 'string' ? Number(durationVal) : durationVal;
+  };
+
+  const getStakeNum = (): number => {
+    if (stake === '') return 0;
+    return typeof stake === 'string' ? Number(stake) : stake;
+  };
+
+  const getStopLossNum = (): number => {
+    if (stopLoss === '') return 0;
+    return typeof stopLoss === 'string' ? Number(stopLoss) : stopLoss;
+  };
+
+  const getTakeProfitNum = (): number => {
+    if (takeProfit === '') return 0;
+    return typeof takeProfit === 'string' ? Number(takeProfit) : takeProfit;
+  };
 
   const handleContractChange = (c: ContractType) => {
     setContractLocal(c);
@@ -142,36 +162,55 @@ export function AutoTradeControls() {
   const showBarrier = contract === "over_under" || contract === "match_differ";
 
   const handleStart = () => {
-    if (stake < 1) {
-      toast.error("Minimum stake is $1");
+    // ✅ Validate stake
+    const stakeNum = getStakeNum();
+    if (!stakeNum || stakeNum < 1) {
+      toast.error("Please enter a valid stake (min $1)");
       return;
     }
-    if (stake > balance / 2) {
+    if (stakeNum > balance / 2) {
       toast.error(`Stake cannot exceed half of your balance (${formatMoney(balance / 2, currency, fxRate)})`);
       return;
     }
-    if (stopLoss < stake) {
-      toast.error(`Stop Loss (${formatMoney(stopLoss, currency, fxRate)}) must be greater than or equal to stake (${formatMoney(stake, currency, fxRate)})`);
-      return;
-    }
-    if (takeProfit < stake) {
-      toast.error(`Take Profit (${formatMoney(takeProfit, currency, fxRate)}) must be greater than or equal to stake (${formatMoney(stake, currency, fxRate)})`);
+
+    // ✅ Validate stop loss
+    const stopLossNum = getStopLossNum();
+    if (!stopLossNum || stopLossNum < stakeNum) {
+      toast.error(`Stop Loss must be greater than or equal to stake (${formatMoney(stakeNum, currency, fxRate)})`);
       return;
     }
 
-    const durationMs = durationVal * UNIT_TO_MS[durationUnit];
+    // ✅ Validate take profit
+    const takeProfitNum = getTakeProfitNum();
+    if (!takeProfitNum || takeProfitNum < stakeNum) {
+      toast.error(`Take Profit must be greater than or equal to stake (${formatMoney(stakeNum, currency, fxRate)})`);
+      return;
+    }
+
+    // ✅ Validate duration
+    const durationNum = getDurationNum();
+    if (!durationNum || durationNum < UNIT_MIN[durationUnit]) {
+      toast.error(`Please enter a valid duration (min ${UNIT_MIN[durationUnit]} ${durationUnit})`);
+      return;
+    }
+    if (durationNum > UNIT_MAX[durationUnit]) {
+      toast.error(`Duration cannot exceed ${UNIT_MAX[durationUnit]} ${durationUnit}`);
+      return;
+    }
+
+    const durationMs = durationNum * UNIT_TO_MS[durationUnit];
     
-    console.log(`[Auto Trade] Starting with duration: ${durationVal} ${durationUnit} = ${durationMs}ms`);
+    console.log(`[Auto Trade] Starting with duration: ${durationNum} ${durationUnit} = ${durationMs}ms`);
 
     startAutoTrade({
       direction,
       contract,
-      stake,
-      stopLoss,
-      takeProfit,
+      stake: stakeNum,
+      stopLoss: stopLossNum,
+      takeProfit: takeProfitNum,
       durationMs,
       durationUnit,
-      durationVal,
+      durationVal: durationNum,
       barrier: showBarrier ? barrier : undefined,
     });
   };
@@ -181,14 +220,6 @@ export function AutoTradeControls() {
   };
 
   const dirs = getDirectionOptions(contract);
-
-  // Format duration display
-  const getDurationDisplay = () => {
-    if (durationUnit === "ticks") {
-      return `${durationVal} ticks = ${durationVal}s`;
-    }
-    return `${durationVal} ${durationUnit}`;
-  };
 
   return (
     <div className="space-y-4">
@@ -335,7 +366,12 @@ export function AutoTradeControls() {
                     setDurationUnit(unit);
                     const max = UNIT_MAX[unit];
                     const min = UNIT_MIN[unit];
-                    setDurationVal(Math.min(max, Math.max(min, durationVal)));
+                    const currentVal = getDurationNum();
+                    if (currentVal) {
+                      setDurationVal(Math.min(max, Math.max(min, currentVal)));
+                    } else {
+                      setDurationVal(min);
+                    }
                   }}
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
                 >
@@ -349,16 +385,21 @@ export function AutoTradeControls() {
               <div className="flex-1 flex items-center gap-1">
                 <Input
                   type="number"
-                  value={durationVal}
                   min={UNIT_MIN[durationUnit]}
                   max={UNIT_MAX[durationUnit]}
+                  value={durationVal}
                   onChange={(e) => {
-                    const n = Number(e.target.value);
+                    const val = e.target.value;
+                    if (val === '') {
+                      setDurationVal(val);
+                      return;
+                    }
+                    const n = Number(val);
                     if (Number.isFinite(n)) {
                       setDurationVal(Math.min(UNIT_MAX[durationUnit], Math.max(UNIT_MIN[durationUnit], n)));
                     }
                   }}
-                  className="w-full text-center"
+                  className="w-full text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                 />
               </div>
             </div>
@@ -373,7 +414,7 @@ export function AutoTradeControls() {
           <div>
             <div className="flex items-center justify-between mb-1">
               <Label className="text-xs text-muted-foreground">Stake per trade</Label>
-              <span className="text-sm font-medium">{formatMoney(stake, currency, fxRate)}</span>
+              <span className="text-sm font-medium">{formatMoney(getStakeNum() || 0, currency, fxRate)}</span>
             </div>
             <div className="flex gap-2">
               <Input
@@ -383,10 +424,15 @@ export function AutoTradeControls() {
                 step={0.5}
                 value={stake}
                 onChange={(e) => {
-                  const n = Number(e.target.value);
+                  const val = e.target.value;
+                  if (val === '') {
+                    setStake(val);
+                    return;
+                  }
+                  const n = Number(val);
                   if (Number.isFinite(n)) setStake(Math.max(1, n));
                 }}
-                className="flex-1"
+                className="flex-1 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
               />
             </div>
             <div className="mt-1 flex flex-wrap gap-1">
@@ -416,38 +462,50 @@ export function AutoTradeControls() {
               <div className="flex items-center justify-between mb-1">
                 <Label className="text-xs text-muted-foreground">Stop Loss</Label>
                 <span className="text-xs font-medium text-destructive">
-                  {formatMoney(stopLoss, currency, fxRate)}
+                  {formatMoney(getStopLossNum() || 0, currency, fxRate)}
                 </span>
               </div>
               <Input
                 type="number"
-                min={stake + 1}
+                min={1}
                 max={100}
                 step={1}
                 value={stopLoss}
                 onChange={(e) => {
-                  const n = Number(e.target.value);
-                  if (Number.isFinite(n)) setStopLoss(Math.max(stake + 1, n));
+                  const val = e.target.value;
+                  if (val === '') {
+                    setStopLoss(val);
+                    return;
+                  }
+                  const n = Number(val);
+                  if (Number.isFinite(n)) setStopLoss(Math.max(1, n));
                 }}
+                className="[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
               />
             </div>
             <div>
               <div className="flex items-center justify-between mb-1">
                 <Label className="text-xs text-muted-foreground">Take Profit</Label>
                 <span className="text-xs font-medium text-primary">
-                  {formatMoney(takeProfit, currency, fxRate)}
+                  {formatMoney(getTakeProfitNum() || 0, currency, fxRate)}
                 </span>
               </div>
               <Input
                 type="number"
-                min={stake + 1}
+                min={1}
                 max={100}
                 step={1}
                 value={takeProfit}
                 onChange={(e) => {
-                  const n = Number(e.target.value);
-                  if (Number.isFinite(n)) setTakeProfit(Math.max(stake + 1, n));
+                  const val = e.target.value;
+                  if (val === '') {
+                    setTakeProfit(val);
+                    return;
+                  }
+                  const n = Number(val);
+                  if (Number.isFinite(n)) setTakeProfit(Math.max(1, n));
                 }}
+                className="[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
               />
             </div>
           </div>
@@ -471,15 +529,15 @@ export function AutoTradeControls() {
           <Button
             onClick={handleStart}
             className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
-            disabled={balance < stake * 2}
+            disabled={balance < getStakeNum() * 2 || !getStakeNum()}
           >
             <Play className="h-4 w-4 mr-2" />
             Start Auto Trading
           </Button>
 
-          {balance < stake * 2 && (
+          {balance < getStakeNum() * 2 && getStakeNum() > 0 && (
             <p className="text-center text-xs text-destructive">
-              Insufficient balance. Need at least {formatMoney(stake * 2, currency, fxRate)} to start.
+              Insufficient balance. Need at least {formatMoney(getStakeNum() * 2, currency, fxRate)} to start.
             </p>
           )}
         </div>
