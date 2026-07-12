@@ -3,6 +3,7 @@ const helmet = require('helmet')
 const rateLimit = require('express-rate-limit')
 const { createClient } = require('@supabase/supabase-js')
 const { validationResult, body, param, header } = require('express-validator')
+const db = require('./database') // service-role client — used for role checks so RLS doesn't block them
 
 function securityHeaders() {
   return helmet({
@@ -65,7 +66,14 @@ async function authenticate(req, res, next) {
 function requireRole(role) {
   return async (req, res, next) => {
     try {
-      const { data, error } = await supabaseAuth
+      // Use the service-role client (db.supabase), not the anon `supabaseAuth`
+      // client above. `supabaseAuth` never carries the caller's JWT into this
+      // query, so with RLS enabled on `user_roles` it always ran as an
+      // unauthenticated role and returned no rows — every admin request was
+      // silently rejected with 403 even for real admins. The login route in
+      // server.js already uses `db.supabase` for this exact check, so this
+      // keeps the two role checks consistent.
+      const { data, error } = await db.supabase
         .from('user_roles')
         .select('role')
         .eq('user_id', req.user.id)
@@ -120,13 +128,26 @@ function validate(req, res, next) {
 
 function checkIdempotency() {
   return async (req, res, next) => {
-    const key = req.headers['x-idempotency-key']
-    if (!key) {
+    const rawKey = req.headers['x-idempotency-key']
+    if (!rawKey) {
       req.idempotencyKey = null
       req.idempotencyStore = null
       return next()
     }
-    
+
+    // Scope the stored key by route. idempotency_keys only has
+    // UNIQUE(key, user_id) — no endpoint/action column — so if a client
+    // ever reused the same raw key across two different mutating routes
+    // (e.g. a deposit and, later, a withdrawal) within the 24h window,
+    // this lookup would match the OTHER route's cached response and
+    // return it immediately without ever running the current handler.
+    // That looks like a normal 200 success to the caller — e.g. a
+    // withdrawal request silently replaying an old deposit's response —
+    // while writing nothing and deducting nothing. Prefixing with the
+    // method+path keeps different endpoints from colliding even if the
+    // raw client key is reused.
+    const key = `${req.method}:${req.path}:${rawKey}`
+
     const { data, error } = await supabaseAuth
       .from('idempotency_keys')
       .select('response, created_at')
@@ -186,7 +207,8 @@ const validators = {
   depositMpesa: [
     header('x-idempotency-key').optional().isString().isLength({ min: 10 }),
     body('phone').custom(validatePhone),
-    body('amountKES').isFloat({ min: 260 }).withMessage('Minimum deposit is KES 260 (~$2)'),
+    // ✅ UPDATED: Minimum deposit is now $4 (520 KES at ~130 rate)
+    body('amountKES').isFloat({ min: 520 }).withMessage('Minimum deposit is KES 520 (~$4)'),
   ],
 
   withdrawMpesa: [
@@ -213,7 +235,16 @@ const validators = {
 
   setUserRole: [
     param('userId').isUUID(),
-    body('role').isIn(['user', 'support', 'admin']),
+    body('role').isIn(['user', 'support', 'admin', 'tech', 'influencer']),
+  ],
+
+  // ✅ NEW: Influencer validators
+  influencerWithdraw: [
+    body('amountUSD').isFloat({ min: 2 }).withMessage('Minimum withdrawal is $2'),
+  ],
+
+  adminInfluencerWithdrawalReview: [
+    body('notes').optional().isString().isLength({ max: 500 }),
   ],
 
   kycUpload: [],

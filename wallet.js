@@ -36,7 +36,6 @@ let mpesaAccessToken = null
 let tokenExpiryTime = null
 
 async function getMpesaAccessToken() {
-  // Check if we have a valid token
   if (mpesaAccessToken && tokenExpiryTime && Date.now() < tokenExpiryTime) {
     return mpesaAccessToken
   }
@@ -63,7 +62,6 @@ async function getMpesaAccessToken() {
     }
 
     mpesaAccessToken = data.access_token
-    // Set expiry to 50 minutes (tokens last 1 hour)
     tokenExpiryTime = Date.now() + (50 * 60 * 1000)
     
     console.log('[M-Pesa] Access token obtained successfully')
@@ -86,17 +84,13 @@ async function initiateStkPush(phone, amountKES, reference) {
 
   const accessToken = await getMpesaAccessToken()
   
-  // Format phone for STK Push (remove leading 0 or 254)
   const phoneForSTK = formattedPhone.replace(/^254/, '')
   
-  // Generate timestamp
   const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)
   
-  // Generate password
   const passwordBuffer = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`)
   const password = passwordBuffer.toString('base64')
 
-  // Prepare STK Push request
   const stkData = {
     BusinessShortCode: MPESA_SHORTCODE,
     Password: password,
@@ -213,117 +207,6 @@ function formatPhoneNumber(phone) {
   return cleaned
 }
 
-// ── PalPluss Code (Commented Out) ──────────────────────────────
-
-/*
-// ── PalPluss API Configuration ────────────────────────────────────
-
-const PALPLUSS_BASE_URL = process.env.PALPLUSS_BASE_URL || 'https://api.palpluss.com/v1'
-const PALPLUSS_API_KEY = process.env.PALPLUSS_API_KEY
-const PALPLUSS_BASIC_AUTH_TOKEN = process.env.PALPLUSS_BASIC_AUTH_TOKEN
-
-function getAuthHeader() {
-  if (PALPLUSS_BASIC_AUTH_TOKEN) {
-    return 'Basic ' + PALPLUSS_BASIC_AUTH_TOKEN
-  }
-  
-  if (PALPLUSS_API_KEY) {
-    const credentials = `${PALPLUSS_API_KEY}:`
-    const encoded = Buffer.from(credentials).toString('base64')
-    return 'Basic ' + encoded
-  }
-  
-  return null
-}
-
-const HAS_PALPLUSS_CREDENTIALS = !!(PALPLUSS_BASIC_AUTH_TOKEN || PALPLUSS_API_KEY)
-
-console.log(`[PalPluss] Credentials: ${HAS_PALPLUSS_CREDENTIALS ? '✅ Configured' : '⚠️ Mock Mode'}`)
-
-async function palplussRequest(endpoint, method = 'POST', data = null) {
-  const authHeader = getAuthHeader()
-  
-  if (!authHeader) {
-    console.log(`[PalPluss MOCK] ${method} ${endpoint}`, data)
-    return {
-      checkoutRequestId: `mock_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      merchantRequestId: `mock_merchant_${Date.now()}`,
-      status: 'pending',
-      message: 'STK Push sent (MOCK)',
-    }
-  }
-
-  const url = `${PALPLUSS_BASE_URL}${endpoint}`
-  console.log(`[PalPluss] Request URL: ${url}`)
-  
-  const options = {
-    method,
-    headers: {
-      'Authorization': authHeader,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json',
-    },
-  }
-
-  if (data) {
-    options.body = JSON.stringify(data)
-  }
-
-  try {
-    const response = await fetch(url, options)
-    const result = await response.json()
-
-    if (!result.success) {
-      const error = result.error || { message: 'PalPluss API error', code: 'UNKNOWN_ERROR' }
-      throw new Error(`PalPluss: ${error.message} (${error.code})`)
-    }
-
-    return result.data
-  } catch (error) {
-    console.error('[PalPluss] API Error:', error.message)
-    throw error
-  }
-}
-
-async function initiateStkPushPalPluss(phone, amountKES, reference, channelId = null) {
-  console.log(`[PalPluss] STK Push to ${phone} for KES ${amountKES}, ref: ${reference}`)
-  
-  const formattedPhone = formatPhoneNumber(phone)
-  if (!formattedPhone) {
-    throw new Error('Invalid phone number format. Use 07XXXXXXXX, 01XXXXXXXX, or 2547XXXXXXXX')
-  }
-  
-  const paymentChannelId = channelId || process.env.PALPLUSS_CHANNEL_ID || 'your-payment-channel-id'
-  
-  const requestData = {
-    amount: amountKES,
-    phone: formattedPhone,
-    accountReference: reference || 'GWave',
-    transactionDesc: `G Wave deposit - ${reference}`,
-    channelId: paymentChannelId,
-    callbackUrl: process.env.PALPLUSS_CALLBACK_URL || 'https://your-ngrok-url.ngrok.io/wallet/palpluss/callback',
-  }
-  
-  console.log('[PalPluss] Request data:', JSON.stringify(requestData, null, 2))
-  
-  const data = await palplussRequest('/payments/stk', 'POST', requestData)
-
-  return { 
-    checkoutRequestId: data.checkoutRequestId || data.merchantRequestId || data.id || data.reference,
-    ...data 
-  }
-}
-
-async function checkPalPlussTransactionStatus(palplussTransactionId) {
-  try {
-    return await palplussRequest(`/transactions/${palplussTransactionId}`, 'GET')
-  } catch (error) {
-    console.error('[PalPluss] Status check failed:', error.message)
-    return null
-  }
-}
-*/
-
 // ── Handler Functions ─────────────────────────────────────────────
 
 async function getBalance(req, res, next) {
@@ -401,10 +284,11 @@ async function depositMpesa(req, res, next) {
       })
     }
 
-    if (amountKES < 260) {
+    // ✅ UPDATED: Minimum deposit is now $4 (520 KES)
+    if (amountKES < 520) {
       return res.status(400).json({
         success: false,
-        error: 'Minimum deposit is KES 260 (~$2)',
+        error: 'Minimum deposit is KES 520 (~$4)',
         code: 'VALIDATION_ERROR'
       })
     }
@@ -442,11 +326,9 @@ async function depositMpesa(req, res, next) {
     const rate = await db.getExchangeRate('USD', 'KES')
     const amountUSD = parseFloat((amountKES / rate).toFixed(8))
 
-    // Generate reference BEFORE creating transaction
     const txId = crypto.randomUUID()
     const reference = `GWAVE_DEP_${txId.substring(0, 8).toUpperCase()}`
 
-    // Create transaction with reference already set
     const tx = await db.createTransaction({
       id: txId,
       user_id: userId,
@@ -460,11 +342,9 @@ async function depositMpesa(req, res, next) {
 
     let checkoutRequestId
     try {
-      // Using Daraja STK Push
       const result = await initiateStkPush(formattedPhone, Math.round(amountKES), reference)
       checkoutRequestId = result.checkoutRequestId
       
-      // Store the checkoutRequestId in the reference field
       await db.updateTransactionStatus(tx.id, 'pending', checkoutRequestId)
       
       console.log(`[Deposit] STK Push initiated. CheckoutRequestID: ${checkoutRequestId}`)
@@ -509,14 +389,13 @@ async function depositMpesa(req, res, next) {
   }
 }
 
-// ── ✅ M-Pesa Callback (Daraja) ──────────────────────────────────
+// ── M-Pesa Callback ─────────────────────────────────────────────
 
 async function mpesaCallback(req, res, next) {
   try {
     const payload = req.body
     console.log('[M-Pesa] Callback received:', JSON.stringify(payload, null, 2))
     
-    // Daraja callback structure
     const { Body } = payload
     
     if (!Body || !Body.stkCallback) {
@@ -537,32 +416,25 @@ async function mpesaCallback(req, res, next) {
 
     console.log(`[M-Pesa] Callback: CheckoutRequestID: ${CheckoutRequestID}, ResultCode: ${ResultCode}`)
 
-    // Find transaction by reference (checkoutRequestId stored in reference field)
     let tx = await db.getTransactionByReference(CheckoutRequestID)
     
     if (!tx) {
-      // Try to find by merchant request ID
       tx = await db.getTransactionByReference(MerchantRequestID)
     }
 
     if (!tx) {
       console.warn(`[M-Pesa] Unknown transaction. CheckoutRequestID: ${CheckoutRequestID}, MerchantRequestID: ${MerchantRequestID}`)
-      // Still respond with success to avoid retries
       return res.status(200).json({ ResultCode: 0, ResultDesc: 'Callback received' })
     }
 
     console.log(`[M-Pesa] Found transaction: ${tx.id} for user ${tx.user_id}`)
 
-    // If transaction is already completed or failed, ignore
     if (tx.status !== 'pending') {
       console.log(`[M-Pesa] Transaction ${tx.id} already ${tx.status}, ignoring callback`)
       return res.status(200).json({ ResultCode: 0, ResultDesc: 'Callback received' })
     }
 
-    // Process based on ResultCode
-    // 0 = Success, others = Failure
     if (ResultCode === 0) {
-      // Success - extract payment details from metadata
       let amount = 0
       let phoneNumber = ''
       let transactionDate = ''
@@ -581,11 +453,9 @@ async function mpesaCallback(req, res, next) {
         }
       }
 
-      // Update transaction
       await db.updateTransactionStatus(tx.id, 'completed', CheckoutRequestID)
       console.log(`[M-Pesa] Transaction ${tx.id} marked as completed`)
       
-      // Credit the account
       const account = await db.getAccountByUserAndType(tx.user_id, 'real')
       if (account) {
         await db.addBalance(account.id, parseFloat(tx.amount_usd))
@@ -593,12 +463,10 @@ async function mpesaCallback(req, res, next) {
       }
 
     } else {
-      // Failed transaction
       await db.updateTransactionStatus(tx.id, 'failed', CheckoutRequestID)
       console.log(`[M-Pesa] Transaction ${tx.id} marked as failed: ${ResultDesc}`)
     }
 
-    // Respond with success to Safaricom
     res.status(200).json({ 
       ResultCode: 0, 
       ResultDesc: 'Callback processed successfully' 
@@ -606,7 +474,6 @@ async function mpesaCallback(req, res, next) {
     
   } catch (err) {
     console.error('[M-Pesa] Callback error:', err)
-    // Always respond with success to prevent retries
     res.status(200).json({ 
       ResultCode: 0, 
       ResultDesc: 'Callback received with errors, but acknowledged' 
@@ -614,13 +481,12 @@ async function mpesaCallback(req, res, next) {
   }
 }
 
-// ── Check pending transactions (polling endpoint) ─────────────────
+// ── Check pending transactions ─────────────────────────────────
 
 async function checkPendingTransactions(req, res, next) {
   try {
     const userId = req.user.id
     
-    // Get all pending deposit transactions
     const { data: pendingTxs, error } = await db.supabase
       .from('transactions')
       .select('id, reference, amount_usd, amount_kes, created_at, status')
@@ -631,7 +497,6 @@ async function checkPendingTransactions(req, res, next) {
 
     if (error) throw error
 
-    // If no pending transactions, return empty array
     if (!pendingTxs || pendingTxs.length === 0) {
       return res.json({ 
         success: true, 
@@ -646,13 +511,11 @@ async function checkPendingTransactions(req, res, next) {
     let hasPending = false
 
     for (const tx of pendingTxs) {
-      // Check if the transaction is older than 5 minutes
       const createdAt = new Date(tx.created_at)
       const now = new Date()
       const ageMinutes = (now - createdAt) / 60000
 
       if (ageMinutes > 5) {
-        // Mark as failed if older than 5 minutes
         await db.updateTransactionStatus(tx.id, 'failed')
         updatedTransactions.push({
           id: tx.id,
@@ -664,17 +527,14 @@ async function checkPendingTransactions(req, res, next) {
         continue
       }
 
-      // Check with M-Pesa if we have a checkout request ID
       if (tx.reference) {
         try {
           const result = await checkMpesaTransactionStatus(tx.reference)
           
           if (result) {
-            // Check if transaction is completed
             if (result.ResultCode === '0' && result.ResultDesc === 'The service request is processed successfully.') {
               await db.updateTransactionStatus(tx.id, 'completed', tx.reference)
               
-              // Credit the account
               const account = await db.getAccountByUserAndType(userId, 'real')
               if (account) {
                 await db.addBalance(account.id, parseFloat(tx.amount_usd))
@@ -688,8 +548,6 @@ async function checkPendingTransactions(req, res, next) {
               })
               console.log(`[Polling] Transaction ${tx.id} marked as completed`)
             } else if (result.ResultCode !== '1037') {
-              // 1037 means still pending
-              // Any other code means failed
               await db.updateTransactionStatus(tx.id, 'failed', tx.reference)
               updatedTransactions.push({
                 id: tx.id,
@@ -699,7 +557,6 @@ async function checkPendingTransactions(req, res, next) {
               })
               console.log(`[Polling] Transaction ${tx.id} marked as failed`)
             } else {
-              // Still pending
               hasPending = true
               updatedTransactions.push({
                 id: tx.id,
@@ -709,7 +566,6 @@ async function checkPendingTransactions(req, res, next) {
               })
             }
           } else {
-            // Couldn't check status - assume still pending
             hasPending = true
             updatedTransactions.push({
               id: tx.id,
@@ -720,7 +576,6 @@ async function checkPendingTransactions(req, res, next) {
           }
         } catch (err) {
           console.error(`[Polling] Failed to check transaction ${tx.id}:`, err.message)
-          // Keep as pending
           hasPending = true
           updatedTransactions.push({
             id: tx.id,
@@ -730,7 +585,6 @@ async function checkPendingTransactions(req, res, next) {
           })
         }
       } else {
-        // No reference - keep as pending
         hasPending = true
         updatedTransactions.push({
           id: tx.id,
@@ -753,89 +607,6 @@ async function checkPendingTransactions(req, res, next) {
     next(err)
   }
 }
-
-// ── PalPluss Callback (Commented Out) ──────────────────────────
-
-/*
-async function palplussCallback(req, res, next) {
-  try {
-    const payload = req.body
-    console.log('[PalPluss] Webhook received:', JSON.stringify(payload, null, 2))
-    
-    const { transaction } = payload
-
-    if (!transaction || !transaction.id) {
-      console.warn('[PalPluss] Invalid webhook payload - missing transaction')
-      return res.status(200).json({ success: true, received: true })
-    }
-
-    const { 
-      id: palplussTransactionId,
-      status,
-      result_code,
-      result_desc,
-      external_reference
-    } = transaction
-
-    console.log('[PalPluss] Looking up transaction by external_reference:', external_reference)
-
-    let tx = null
-    
-    if (external_reference) {
-      tx = await db.getTransactionByReference(external_reference)
-      if (tx) {
-        console.log('[PalPluss] Found transaction by external_reference:', tx.id)
-      }
-    }
-    
-    if (!tx) {
-      console.log('[PalPluss] Trying to find by PalPluss transaction ID:', palplussTransactionId)
-      tx = await db.getTransactionByReference(palplussTransactionId)
-      if (tx) {
-        console.log('[PalPluss] Found transaction by PalPluss ID:', tx.id)
-      }
-    }
-
-    if (!tx) {
-      console.warn(`[PalPluss] Unknown transaction. External ref: ${external_reference}, PalPluss ID: ${palplussTransactionId}`)
-      return res.status(200).json({ success: true, received: true })
-    }
-
-    console.log(`[PalPluss] Found transaction: ${tx.id} for user ${tx.user_id}`)
-
-    const isSuccess = result_code === '0' || status === 'SUCCESS'
-    const isFailed = result_code !== '0' || status === 'FAILED' || status === 'CANCELLED'
-
-    if (isSuccess && tx.status === 'pending') {
-      await db.updateTransactionStatus(tx.id, 'completed', palplussTransactionId)
-      console.log(`[PalPluss] Transaction ${tx.id} marked as completed`)
-      
-      if (tx.type === 'deposit') {
-        const account = await db.getAccountByUserAndType(tx.user_id, 'real')
-        await db.addBalance(account.id, parseFloat(tx.amount_usd))
-        console.log(`[PalPluss] Credited ${tx.amount_usd} USD to account ${account.id}`)
-      }
-    } else if (isFailed && tx.status === 'pending') {
-      await db.updateTransactionStatus(tx.id, 'failed', palplussTransactionId)
-      console.log(`[PalPluss] Transaction ${tx.id} marked as failed: ${result_desc || status}`)
-    }
-
-    res.status(200).json({ 
-      success: true, 
-      received: true,
-      message: 'Webhook processed successfully'
-    })
-    
-  } catch (err) {
-    console.error('[PalPluss] Webhook error:', err)
-    res.status(200).json({ 
-      success: true, 
-      received: true,
-      message: 'Webhook received with errors, but acknowledged'
-    })
-  }
-}
-*/
 
 // ── Manual completion for testing ─────────────────────────────────
 
@@ -916,14 +687,17 @@ async function withdrawMpesa(req, res, next) {
       })
     }
 
-    const kycStatus = await getKycStatus(userId)
-    if (kycStatus !== 'approved') {
-      return res.status(403).json({
-        success: false,
-        error: 'KYC verification required.',
-        code: 'KYC_REQUIRED'
-      })
-    }
+    // Only require KYC for withdrawals over $100
+if (amountUSD > 100) {
+  const kycStatus = await getKycStatus(userId)
+  if (kycStatus !== 'approved') {
+    return res.status(403).json({
+      success: false,
+      error: 'KYC verification required for withdrawals over $100.',
+      code: 'KYC_REQUIRED'
+    })
+  }
+}
 
     const today = new Date()
     today.setHours(0, 0, 0, 0)
@@ -1119,8 +893,7 @@ module.exports = {
   getTransactions,
   getRateHandler,
   depositMpesa,
-  mpesaCallback, // ✅ New Daraja callback
-  // palplussCallback, // ❌ Commented out
+  mpesaCallback,
   withdrawMpesa,
   getWithdrawals,
   uploadKycDocuments,
@@ -1128,10 +901,8 @@ module.exports = {
   getKycStatus,
   kycUpload,
   initiateStkPush,
-  checkMpesaTransactionStatus, // ✅ New status check
-  // checkPalPlussTransactionStatus, // ❌ Commented out
+  checkMpesaTransactionStatus,
   completeTransactionManually,
   checkPendingTransactions,
   formatPhoneNumber,
-  getWithdrawals
 }

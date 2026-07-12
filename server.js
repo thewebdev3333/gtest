@@ -14,6 +14,7 @@ const wallet = require('./wallet')
 const market = require('./market')
 const admin = require('./admin')
 const exchange = require('./exchange')
+const influencer = require('./influencer')
 
 const app = express()
 const httpServer = http.createServer(app)
@@ -26,6 +27,10 @@ app.use(express.json({ limit: '10kb' }))
 app.use(morgan('combined'))
 app.use(mw.apiLimiter)
 
+
+//static file serving
+app.use(express.static('public'));
+
 // ── Health check ───────────────────────────────────────────────────
 
 app.get('/health', (req, res) => {
@@ -35,6 +40,86 @@ app.get('/health', (req, res) => {
     uptime: process.uptime()
   })
 })
+
+// server.js - Add this before the admin routes
+
+// ── Admin Login ───────────────────────────────────────────────────
+app.post('/admin/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Email and password required.',
+        code: 'VALIDATION_ERROR'
+      });
+    }
+
+    // Sign in using the anon-key client (mw.supabaseAuth), NOT db.supabase.
+    // db.supabase is the service-role client, shared as a module-level
+    // singleton across the whole app (auth.js, admin.js, requireRole, etc.)
+    // specifically so it can bypass RLS. Calling .auth.signInWithPassword()
+    // on a supabase-js client makes that client start sending the signed-in
+    // user's access token as the Authorization header on every subsequent
+    // .from() call instead of the service-role key it was built with. Doing
+    // that on db.supabase would silently "downgrade" it for the rest of the
+    // process to acting as whichever admin last logged in — every query
+    // anywhere in the app (getUsers, getPendingKyc, getAllTransactions,
+    // getPlatformStats, even requireRole's own role check) would then run
+    // under RLS as that one user, which is why the dashboard only showed
+    // that admin's own rows. mw.supabaseAuth is a separate anon-key client
+    // used only for this sign-in exchange, so db.supabase never gets touched.
+    const { data, error } = await mw.supabaseAuth.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (error) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid credentials.',
+        code: 'AUTH_FAILED'
+      });
+    }
+
+    // Check if user has admin role — safe to use db.supabase here, this is
+    // a plain .from() read, not an auth call, so it doesn't touch its session.
+    const { data: roleData, error: roleError } = await db.supabase
+      .from('user_roles')
+      .select('role')
+      .eq('user_id', data.user.id)
+      .single();
+
+    if (roleError || !roleData || roleData.role !== 'admin') {
+      await mw.supabaseAuth.auth.signOut();
+      return res.status(403).json({
+        success: false,
+        error: 'Admin access required.',
+        code: 'FORBIDDEN'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        token: data.session.access_token,
+        user: {
+          id: data.user.id,
+          email: data.user.email,
+          role: roleData.role
+        }
+      }
+    });
+  } catch (err) {
+    console.error('[Admin Login] Error:', err);
+    res.status(500).json({
+      success: false,
+      error: 'Login failed.',
+      code: 'SERVER_ERROR'
+    });
+  }
+});
 
 // ── Auth routes ────────────────────────────────────────────────────
 
@@ -451,6 +536,65 @@ app.post('/admin/exchange/refresh',
   mw.authenticate,
   mw.requireRole('admin'),
   admin.refreshExchangeRate
+)
+
+app.get('/admin/transactions',
+  mw.authenticate,
+  mw.requireRole('admin'),
+  admin.getAllTransactions
+)
+
+app.get('/admin/stats',
+  mw.authenticate,
+  mw.requireRole('admin'),
+  admin.getStats
+)
+
+app.get('/admin/influencer-withdrawals',
+  mw.authenticate,
+  mw.requireRole('admin'),
+  admin.getInfluencerWithdrawals
+)
+
+app.post('/admin/influencer-withdrawals/:id/mark-sent',
+  mw.authenticate,
+  mw.requireRole('admin'),
+  mw.validators.adminInfluencerWithdrawalReview,
+  mw.validate,
+  admin.markInfluencerWithdrawalSent
+)
+
+app.post('/admin/influencer-withdrawals/:id/mark-failed',
+  mw.authenticate,
+  mw.requireRole('admin'),
+  mw.validators.adminInfluencerWithdrawalReview,
+  mw.validate,
+  admin.markInfluencerWithdrawalFailed
+)
+
+// ── Influencer routes (mock withdrawal demo flow) ───────────────────
+// Influencers cannot access the admin dashboard — requireRole('influencer')
+// is a distinct role from 'admin', so these are the only endpoints they can hit.
+
+app.get('/influencer/balance',
+  mw.authenticate,
+  mw.requireRole('influencer'),
+  influencer.getBalance
+)
+
+app.get('/influencer/withdrawals',
+  mw.authenticate,
+  mw.requireRole('influencer'),
+  influencer.getWithdrawals
+)
+
+app.post('/influencer/withdraw',
+  mw.authenticate,
+  mw.requireRole('influencer'),
+  mw.withdrawalLimiter,
+  mw.validators.influencerWithdraw,
+  mw.validate,
+  influencer.requestWithdrawal
 )
 
 // ── Global error handler ───────────────────────────────────────────

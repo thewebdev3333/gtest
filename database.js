@@ -257,6 +257,114 @@ async function getAccountById(accountId) {
   return data
 }
 
+// ── Admin: transactions & stats ─────────────────────────────────────
+
+async function getAllTransactionsAdmin({ limit = 20, offset = 0, type, status } = {}) {
+  // PostgREST never exposes the `auth` schema (see profiles.sql), so
+  // embedding `users:auth.users(email)` here threw at the DB layer on
+  // every call — that's what was surfacing as "transactions fail to
+  // load" on the admin dashboard. admin.js's getAllTransactions already
+  // calls attachProfiles() against `public.profiles` to attach
+  // email/display_name, so this embed was both broken and redundant.
+  let q = supabase
+    .from('transactions')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1)
+
+  if (type) q = q.eq('type', type)
+  if (status) q = q.eq('status', status)
+
+  const { data, error } = await q
+  if (error) throw error
+  return data
+}
+
+async function getAllTransactionsCountAdmin({ type, status } = {}) {
+  let q = supabase
+    .from('transactions')
+    .select('*', { count: 'exact', head: true })
+
+  if (type) q = q.eq('type', type)
+  if (status) q = q.eq('status', status)
+
+  const { count, error } = await q
+  if (error) throw error
+  return count || 0
+}
+
+async function getPlatformStats() {
+  const { data, error } = await supabase.rpc('get_platform_stats').single()
+  if (error) throw error
+  return data
+}
+
+// ── Influencer withdrawals (mock flow) ──────────────────────────────
+
+async function createInfluencerWithdrawal(data) {
+  const { data: row, error } = await supabase
+    .from('influencer_withdrawals')
+    .insert(data)
+    .select()
+    .single()
+  if (error) throw error
+  return row
+}
+
+async function getInfluencerWithdrawalById(id) {
+  const { data, error } = await supabase
+    .from('influencer_withdrawals')
+    .select('*')
+    .eq('id', id)
+    .single()
+  if (error) return null
+  return data
+}
+
+async function getInfluencerWithdrawalsByUser(userId) {
+  const { data, error } = await supabase
+    .from('influencer_withdrawals')
+    .select('*')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return data
+}
+
+async function getAllInfluencerWithdrawals({ status } = {}) {
+  // Same broken auth.users embed as getAllTransactionsAdmin above — removed
+  // for the same reason. Email/display_name should be attached via
+  // attachProfiles() by the caller (admin.js) if the UI needs it.
+  let q = supabase
+    .from('influencer_withdrawals')
+    .select('*')
+    .order('created_at', { ascending: false })
+
+  if (status) q = q.eq('status', status)
+
+  const { data, error } = await q
+  if (error) throw error
+  return data
+}
+
+async function updateInfluencerWithdrawalStatus(id, status, { simulatedBy = null, notes = null } = {}) {
+  const update = { status }
+  if (status !== 'pending') {
+    update.simulated_at = new Date().toISOString()
+    update.simulated_by = simulatedBy
+  }
+  if (notes) update.notes = notes
+
+  const { data, error } = await supabase
+    .from('influencer_withdrawals')
+    .update(update)
+    .eq('id', id)
+    .eq('status', 'pending') // atomic claim, same pattern as settleContract
+    .select()
+  if (error) throw error
+  return data && data.length > 0 ? data[0] : null
+}
+
 module.exports = {
   supabase,
   createUserAccounts,
@@ -280,4 +388,12 @@ module.exports = {
   createKycDocument,
   getKycDocumentsByUser,
   getExchangeRate,
+  getAllTransactionsAdmin,
+  getAllTransactionsCountAdmin,
+  getPlatformStats,
+  createInfluencerWithdrawal,
+  getInfluencerWithdrawalById,
+  getInfluencerWithdrawalsByUser,
+  getAllInfluencerWithdrawals,
+  updateInfluencerWithdrawalStatus,
 }

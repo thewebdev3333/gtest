@@ -3,22 +3,48 @@ const db = require('./database')
 const { getKycStatus } = require('./auth')
 const { initiatePayout } = require('./wallet')
 
+// PostgREST never exposes the `auth` schema, so `auth.users` can't be
+// embedded or queried directly from here (that was the cause of the
+// 500s on /admin/kyc/pending, /admin/withdrawals/pending, /admin/users,
+// /admin/audit-log). Instead we look users up in `public.profiles`
+// (kept in sync by the signup trigger — see profiles.sql) and attach
+// flat `email` / `display_name` fields onto each row.
+async function attachProfiles(rows, userIdField) {
+  if (!rows || rows.length === 0) return rows || []
+
+  const ids = [...new Set(rows.map(r => r[userIdField]).filter(Boolean))]
+  if (ids.length === 0) return rows
+
+  const { data: profiles, error } = await db.supabase
+    .from('profiles')
+    .select('id, email, display_name')
+    .in('id', ids)
+
+  if (error) throw error
+
+  const byId = new Map((profiles || []).map(p => [p.id, p]))
+  return rows.map(row => {
+    const profile = byId.get(row[userIdField])
+    return {
+      ...row,
+      email: profile?.email || null,
+      display_name: profile?.display_name || null,
+    }
+  })
+}
+
 async function getPendingKyc(req, res, next) {
   try {
     const { data, error } = await db.supabase
       .from('kyc_submissions')
-      .select(`
-        id,
-        user_id,
-        status,
-        submitted_at,
-        users:auth.users(email, user_metadata)
-      `)
+      .select('id, user_id, status, submitted_at')
       .eq('status', 'pending')
       .order('submitted_at', { ascending: true })
 
     if (error) throw error
-    res.json({ success: true, data: { submissions: data } })
+
+    const submissions = await attachProfiles(data, 'user_id')
+    res.json({ success: true, data: { submissions } })
   } catch (err) { next(err) }
 }
 
@@ -102,21 +128,14 @@ async function getPendingWithdrawals(req, res, next) {
   try {
     const { data, error } = await db.supabase
       .from('withdrawal_requests')
-      .select(`
-        id,
-        user_id,
-        amount_usd,
-        amount_kes,
-        phone,
-        status,
-        created_at,
-        users:auth.users(email, user_metadata)
-      `)
+      .select('id, user_id, amount_usd, amount_kes, phone, status, created_at')
       .eq('status', 'pending_review')
       .order('created_at', { ascending: true })
 
     if (error) throw error
-    res.json({ success: true, data: { withdrawals: data } })
+
+    const withdrawals = await attachProfiles(data, 'user_id')
+    res.json({ success: true, data: { withdrawals } })
   } catch (err) { next(err) }
 }
 
@@ -232,26 +251,42 @@ async function getUsers(req, res, next) {
     const { page = 1, limit = 20 } = req.query
     const offset = (parseInt(page) - 1) * parseInt(limit)
 
-    const { data, error } = await db.supabase
-      .from('auth.users')
-      .select(`
-        id,
-        email,
-        created_at,
-        user_metadata,
-        roles:user_roles(role),
-        kyc:kyc_submissions(status)
-      `, { count: 'exact' })
+    const { data: profiles, error, count } = await db.supabase
+      .from('profiles')
+      .select('id, email, display_name, created_at', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(offset, offset + parseInt(limit) - 1)
 
     if (error) throw error
+
+    const ids = profiles.map(p => p.id)
+
+    const [{ data: roles, error: rolesErr }, { data: kyc, error: kycErr }] = await Promise.all([
+      db.supabase.from('user_roles').select('user_id, role').in('user_id', ids),
+      db.supabase.from('kyc_submissions').select('user_id, status').in('user_id', ids),
+    ])
+    if (rolesErr) throw rolesErr
+    if (kycErr) throw kycErr
+
+    const roleByUser = new Map((roles || []).map(r => [r.user_id, r.role]))
+    const kycByUser = new Map((kyc || []).map(k => [k.user_id, k.status]))
+
+    const users = profiles.map(p => ({
+      id: p.id,
+      email: p.email,
+      display_name: p.display_name,
+      created_at: p.created_at,
+      role: roleByUser.get(p.id) || 'user',
+      kyc_status: kycByUser.get(p.id) || 'none',
+    }))
+
     res.json({
       success: true,
       data: {
-        users: data,
+        users,
         page: parseInt(page),
         limit: parseInt(limit),
+        total: count,
       },
     })
   } catch (err) { next(err) }
@@ -262,7 +297,7 @@ async function setUserRole(req, res, next) {
     const { userId } = req.params
     const { role } = req.body
 
-    if (!['user', 'support', 'admin'].includes(role)) {
+    if (!['user', 'support', 'admin', 'tech', 'influencer'].includes(role)) {
       return res.status(400).json({
         success: false,
         error: 'Invalid role.',
@@ -293,18 +328,17 @@ async function getAuditLog(req, res, next) {
 
     const { data, error } = await db.supabase
       .from('admin_audit_log')
-      .select(`
-        *,
-        admin:auth.users(email)
-      `)
+      .select('*')
       .order('created_at', { ascending: false })
       .range(offset, offset + parseInt(limit) - 1)
 
     if (error) throw error
+
+    const logs = await attachProfiles(data, 'admin_id')
     res.json({
       success: true,
       data: {
-        logs: data,
+        logs,
         page: parseInt(page),
         limit: parseInt(limit),
       },
@@ -366,6 +400,162 @@ async function refreshExchangeRate(req, res, next) {
   }
 }
 
+// ── Admin: All transactions & platform stats ───────────────────────
+
+/**
+ * GET /admin/transactions
+ * View all transactions across all users, paginated/filterable.
+ */
+async function getAllTransactions(req, res, next) {
+  try {
+    const { page = 1, limit = 20, type, status } = req.query
+    const offset = (parseInt(page) - 1) * parseInt(limit)
+
+    const [transactions, total] = await Promise.all([
+      db.getAllTransactionsAdmin({ limit: parseInt(limit), offset, type, status }),
+      db.getAllTransactionsCountAdmin({ type, status }),
+    ])
+
+    const withProfiles = await attachProfiles(transactions, 'user_id')
+
+    // For withdrawal-type transactions, pull in the linked withdrawal_request
+    // so the dashboard can show Approve/Reject for the ones still pending.
+    const txIds = withProfiles.filter(t => t.type === 'withdrawal').map(t => t.id)
+    let withdrawalByTx = new Map()
+    if (txIds.length > 0) {
+      const { data: wds, error: wdErr } = await db.supabase
+        .from('withdrawal_requests')
+        .select('id, transaction_id, status')
+        .in('transaction_id', txIds)
+      if (wdErr) throw wdErr
+      withdrawalByTx = new Map((wds || []).map(w => [w.transaction_id, w]))
+    }
+
+    const enriched = withProfiles.map(t => {
+      const wd = withdrawalByTx.get(t.id)
+      return {
+        ...t,
+        withdrawal_request_id: wd?.id || null,
+        withdrawal_request_status: wd?.status || null,
+      }
+    })
+
+    res.json({
+      success: true,
+      data: {
+        transactions: enriched,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        totalPages: Math.ceil(total / parseInt(limit)),
+      },
+    })
+  } catch (err) { next(err) }
+}
+
+/**
+ * GET /admin/stats
+ * Total balance sitting in the DB (real + demo), total deposited,
+ * total withdrawn, and total mock influencer withdrawals.
+ */
+async function getStats(req, res, next) {
+  try {
+    const stats = await db.getPlatformStats()
+    res.json({
+      success: true,
+      data: {
+        totalBalanceReal: parseFloat(stats.total_balance_real || 0),
+        totalBalanceDemo: parseFloat(stats.total_balance_demo || 0),
+        totalDeposited: parseFloat(stats.total_deposited || 0),
+        totalWithdrawn: parseFloat(stats.total_withdrawn || 0),
+        totalInfluencerWithdrawn: parseFloat(stats.total_influencer_withdrawn || 0),
+        totalUsers: parseInt(stats.total_users || 0),
+      },
+    })
+  } catch (err) { next(err) }
+}
+
+// ── Admin: Influencer withdrawal simulation ─────────────────────────
+
+/**
+ * GET /admin/influencer-withdrawals
+ * List influencer mock withdrawals (optionally filtered by status),
+ * for the future "simulate send" interface.
+ */
+async function getInfluencerWithdrawals(req, res, next) {
+  try {
+    const { status } = req.query
+    const raw = await db.getAllInfluencerWithdrawals({ status })
+    const withdrawals = await attachProfiles(raw, 'user_id')
+    res.json({ success: true, data: { withdrawals } })
+  } catch (err) { next(err) }
+}
+
+/**
+ * POST /admin/influencer-withdrawals/:id/mark-sent
+ * Simulates the withdrawal having been sent off-platform. No real
+ * money movement — just flips status so the demo record is accurate.
+ */
+async function markInfluencerWithdrawalSent(req, res, next) {
+  try {
+    const { id } = req.params
+    const { notes } = req.body
+    const adminId = req.user.id
+
+    const claimed = await db.updateInfluencerWithdrawalStatus(id, 'sent', { simulatedBy: adminId, notes })
+    if (!claimed) {
+      return res.status(400).json({
+        success: false,
+        error: 'Withdrawal not found or already resolved.',
+        code: 'INVALID_STATE',
+      })
+    }
+
+    await db.supabase.from('admin_audit_log').insert({
+      admin_id: adminId,
+      action: 'influencer_withdrawal_mark_sent',
+      target_type: 'influencer_withdrawal',
+      target_id: id,
+      details: { notes },
+    })
+
+    res.json({ success: true, data: { message: 'Marked as sent.', withdrawal: claimed } })
+  } catch (err) { next(err) }
+}
+
+/**
+ * POST /admin/influencer-withdrawals/:id/mark-failed
+ * Simulates a failed send and refunds the influencer's real balance.
+ */
+async function markInfluencerWithdrawalFailed(req, res, next) {
+  try {
+    const { id } = req.params
+    const { notes } = req.body
+    const adminId = req.user.id
+
+    const claimed = await db.updateInfluencerWithdrawalStatus(id, 'failed', { simulatedBy: adminId, notes })
+    if (!claimed) {
+      return res.status(400).json({
+        success: false,
+        error: 'Withdrawal not found or already resolved.',
+        code: 'INVALID_STATE',
+      })
+    }
+
+    await db.addBalance(claimed.account_id, parseFloat(claimed.amount_usd))
+
+    await db.supabase.from('admin_audit_log').insert({
+      admin_id: adminId,
+      action: 'influencer_withdrawal_mark_failed',
+      target_type: 'influencer_withdrawal',
+      target_id: id,
+      details: { notes },
+    })
+
+    res.json({ success: true, data: { message: 'Marked as failed. Balance restored.', withdrawal: claimed } })
+  } catch (err) { next(err) }
+}
+
 module.exports = {
   getPendingKyc,
   getExchangeRateAdmin,
@@ -377,4 +567,9 @@ module.exports = {
   getUsers,
   setUserRole,
   getAuditLog,
+  getAllTransactions,
+  getStats,
+  getInfluencerWithdrawals,
+  markInfluencerWithdrawalSent,
+  markInfluencerWithdrawalFailed,
 }
