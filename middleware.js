@@ -35,8 +35,8 @@ const apiLimiter = rateLimit({
 
 const withdrawalLimiter = rateLimit({
   windowMs: 24 * 60 * 60 * 1000,
-  max: 3,
-  message: { success: false, error: 'Maximum 3 withdrawals per day.', code: 'RATE_LIMITED' },
+  max: 256,
+  message: { success: false, error: 'Maximum 256 withdrawals per day.', code: 'RATE_LIMITED' },
 })
 
 const supabaseAuth = createClient(

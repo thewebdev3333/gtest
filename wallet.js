@@ -708,7 +708,7 @@ async function withdrawMpesa(req, res, next) {
       .gte('created_at', today.toISOString())
       .in('status', ['pending_review', 'approved', 'processing', 'completed'])
 
-    if (count >= 3) {
+    if (count >= 256) {
       return res.status(429).json({
         success: false,
         error: 'Maximum 3 withdrawals per day.',
