@@ -10,9 +10,11 @@ import { DepositModal } from "@/components/trade/DepositModal";
 import { WithdrawalModal } from "@/components/trade/WithdrawalModal";
 import { 
   getTransactions, 
-  getWithdrawals, 
+  getWithdrawals,
+  getInfluencerWithdrawals,
   type Transaction, 
-  type WithdrawalRequest
+  type WithdrawalRequest,
+  type InfluencerWithdrawal
 } from "@/lib/api";
 import { toast } from "sonner";
 import { Loader2, RefreshCw, Filter, ChevronLeft, ChevronRight } from "lucide-react";
@@ -48,11 +50,44 @@ const TRANSACTION_STATUSES = [
   { value: 'failed', label: 'Failed' },
 ];
 
+// Helper function to get withdrawal display info
+// Handles both normal and influencer withdrawal statuses
+function getWithdrawalDisplayInfo(status: string) {
+  const normalizedStatus = status.toLowerCase();
+  
+  const statusMap: Record<string, { display: string; className: string }> = {
+    // Normal withdrawal statuses
+    'completed': { display: 'Completed', className: 'text-primary' },
+    'pending_review': { display: 'Pending Review', className: 'text-yellow-500' },
+    'pending': { display: 'Pending', className: 'text-yellow-500' },
+    'approved': { display: 'Approved', className: 'text-primary' },
+    'processing': { display: 'Processing', className: 'text-yellow-500' },
+    'rejected': { display: 'Rejected', className: 'text-destructive' },
+    'failed': { display: 'Failed', className: 'text-destructive' },
+    
+    // Influencer withdrawal statuses
+    'sent': { display: 'Completed', className: 'text-primary' },
+  };
+  
+  const info = statusMap[normalizedStatus];
+  
+  if (info) {
+    return info;
+  }
+  
+  // Fallback for unknown status
+  console.warn(`[Withdrawal] Unknown status: "${status}"`);
+  return {
+    display: normalizedStatus.charAt(0).toUpperCase() + normalizedStatus.slice(1),
+    className: 'text-muted-foreground'
+  };
+}
+
 function WalletPage() {
   const [depositOpen, setDepositOpen] = useState(false);
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
+  const [withdrawals, setWithdrawals] = useState<(WithdrawalRequest | InfluencerWithdrawal)[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -70,6 +105,7 @@ function WalletPage() {
   const isAuthenticated = useApp((s) => s.isAuthenticated);
   const fetchBalances = useApp((s) => s.fetchBalances);
   const kycStatus = useApp((s) => s.kycStatus);
+  const role = useApp((s) => s.role);
 
   const loadTransactions = useCallback(async () => {
     try {
@@ -99,14 +135,29 @@ function WalletPage() {
 
   const loadWithdrawals = useCallback(async () => {
     try {
-      const response = await getWithdrawals();
-      if (response.success) {
-        setWithdrawals(response.data.withdrawals);
+      // If user is influencer, read from influencer table
+      if (role === 'influencer') {
+        const response = await getInfluencerWithdrawals();
+        if (response.success) {
+          // Add is_influencer flag for display
+          const flaggedWithdrawals = response.data.withdrawals.map(w => ({
+            ...w,
+            is_influencer: true as const
+          }));
+          setWithdrawals(flaggedWithdrawals);
+        }
+      } else {
+        // Regular users read from normal table
+        const response = await getWithdrawals();
+        if (response.success) {
+          setWithdrawals(response.data.withdrawals);
+        }
       }
     } catch (err) {
       console.error('Failed to load withdrawals:', err);
+      setWithdrawals([]);
     }
-  }, []);
+  }, [role]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -163,7 +214,7 @@ function WalletPage() {
   const handleFilterChange = (type: string, status: string) => {
     setFilterType(type);
     setFilterStatus(status);
-    setPage(1); // Reset to first page when filters change
+    setPage(1);
   };
 
   useEffect(() => {
@@ -186,15 +237,6 @@ function WalletPage() {
     }
   }, [isAuthenticated, loadData, stopPolling]);
 
-  const getTransactionStatusColor = (status: string) => {
-    switch (status) {
-      case 'completed': return 'text-primary';
-      case 'pending': return 'text-yellow-500';
-      case 'failed': return 'text-destructive';
-      default: return 'text-muted-foreground';
-    }
-  };
-
   const getTransactionStatusBadge = (status: string) => {
     switch (status) {
       case 'completed': return <Badge variant="default">Completed</Badge>;
@@ -215,8 +257,7 @@ function WalletPage() {
     }
   };
 
-  // Only KYC required for amounts over $100
-const canWithdraw = realBalance > 0;
+  const canWithdraw = realBalance > 0;
 
   return (
     <AuthGuard>
@@ -357,7 +398,6 @@ const canWithdraw = realBalance > 0;
                   ))}
                 </div>
                 
-                {/* Pagination */}
                 {totalPages > 1 && (
                   <div className="flex items-center justify-between gap-4 mt-4 pt-4 border-t">
                     <div className="text-sm text-muted-foreground">
@@ -390,38 +430,50 @@ const canWithdraw = realBalance > 0;
             )}
           </Card>
 
-
+          {/* Withdrawal Requests - shows based on user role */}
           {withdrawals.length > 0 && (
             <Card className="p-5">
-              <h2 className="mb-3 font-semibold">Withdrawal Requests</h2>
+              <h2 className="mb-3 font-semibold">
+                Withdrawal Requests
+                {role === 'influencer' && (
+                  <span className="ml-2 text-xs font-normal text-muted-foreground">(Mock)</span>
+                )}
+              </h2>
               <div className="divide-y divide-border">
-                {withdrawals.map((w) => (
-                  <div key={w.id} className="flex items-center justify-between py-3 text-sm">
-                    <div>
-                      <div className="font-medium">Withdrawal</div>
-                      <div className="text-xs text-muted-foreground">
-                        {new Date(w.created_at).toLocaleString()}
+                {withdrawals.map((w) => {
+                  const { display: displayStatus, className: displayStatusClass } = 
+                    getWithdrawalDisplayInfo(w.status);
+                  
+                  const isInfluencer = 'is_influencer' in w && w.is_influencer;
+                  
+                  return (
+                    <div key={w.id} className="flex items-center justify-between py-3 text-sm">
+                      <div>
+                        <div className="font-medium">
+                          Withdrawal
+                          {isInfluencer && (
+                            <span className="ml-1 text-xs text-muted-foreground">(Mock)</span>
+                          )}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {new Date(w.created_at).toLocaleString()}
+                          {'phone' in w && w.phone && ` · ${w.phone}`}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div>{formatMoney(parseFloat(w.amount_usd), currency, fxRate)}</div>
+                        <div className={`text-xs ${displayStatusClass}`}>
+                          {displayStatus}
+                        </div>
                       </div>
                     </div>
-                    <div className="text-right">
-                      <div>{formatMoney(parseFloat(w.amount_usd), currency, fxRate)}</div>
-                      {/* ✅ CHANGED: Show "Pending" instead of "pending_review" */}
-                      <div className={`text-xs ${
-                        w.status === 'completed' ? 'text-primary' : 
-                        w.status === 'pending_review' ? 'text-yellow-500' : 
-                        w.status === 'rejected' || w.status === 'failed' ? 'text-destructive' :
-                        'text-muted-foreground'
-                      }`}>
-                        {w.status === 'pending_review' ? 'Pending' : w.status.replace('_', ' ')}
-                      </div>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </Card>
           )}
 
-          <DepositModal open={depositOpen} onOpenChange={setDepositOpen} onDeposited={loadTransactions} />
+          <DepositModal open={depositOpen} onOpenChange={setDepositOpen} onDeposited={loadData} />
           <WithdrawalModal open={withdrawOpen} onOpenChange={setWithdrawOpen} onWithdrawn={loadData} />
         </div>
       </AppShell>

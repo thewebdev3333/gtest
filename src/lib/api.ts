@@ -142,8 +142,6 @@ export interface Transaction {
   created_at: string
 }
 
-// src/lib/api.ts - Update TransactionsResponse and getTransactions
-
 export interface TransactionsResponse {
   success: true
   data: {
@@ -159,14 +157,14 @@ export async function getTransactions(
   page = 1,
   limit = 20,
   type?: string,
-  status?: string  // ← Add status parameter
+  status?: string
 ): Promise<TransactionsResponse> {
   const params = new URLSearchParams({
     page: String(page),
     limit: String(limit),
   })
   if (type) params.append('type', type)
-  if (status) params.append('status', status)  // ← Add status
+  if (status) params.append('status', status)
   
   return apiFetch<TransactionsResponse>(`/wallet/transactions?${params}`)
 }
@@ -186,17 +184,16 @@ export async function getExchangeRate(): Promise<RateResponse> {
   return apiFetch<RateResponse>('/wallet/rate')
 }
 
-// ✅ Updated: Deposit response interface for Daraja
 export interface DepositResponse {
   success: true
   data: {
-    reference: string              // CheckoutRequestID
+    reference: string
     transactionId: string
-    amount: number                 // Amount in KES
-    currency: string              // 'KES'
+    amount: number
+    currency: string
     message: string
-    checkoutRequestId: string     // Same as reference, for clarity
-    existing?: boolean            // If there's already a pending transaction
+    checkoutRequestId: string
+    existing?: boolean
   }
 }
 
@@ -264,6 +261,8 @@ export async function withdrawMpesa(
   })
 }
 
+// ── Normal Withdrawals (for regular users) ─────────────────────
+
 export interface WithdrawalRequest {
   id: string
   amount_usd: string
@@ -280,11 +279,22 @@ export async function getWithdrawals(): Promise<{
   return apiFetch('/wallet/withdrawals')
 }
 
-// ── Influencer Withdrawal API ─────────────────────────────────────
-// Influencer accounts use a separate mock withdrawal flow (see
-// influencer.js on the backend) — no M-Pesa phone number, no idempotency
-// key, and the balance is deducted immediately with status 'pending'
-// until an admin later marks it 'sent' or 'failed'.
+// ── Influencer Withdrawals (for influencer users) ──────────────
+
+export interface InfluencerWithdrawal {
+  id: string
+  amount_usd: string
+  status: 'pending' | 'sent' | 'failed'
+  created_at: string
+  is_influencer: true // Added to identify in UI
+}
+
+export async function getInfluencerWithdrawals(): Promise<{
+  success: true
+  data: { withdrawals: InfluencerWithdrawal[] }
+}> {
+  return apiFetch('/influencer/withdrawals')
+}
 
 export interface InfluencerBalanceResponse {
   success: true
@@ -298,20 +308,6 @@ export interface InfluencerBalanceResponse {
 
 export async function getInfluencerBalance(): Promise<InfluencerBalanceResponse> {
   return apiFetch<InfluencerBalanceResponse>('/influencer/balance')
-}
-
-export interface InfluencerWithdrawal {
-  id: string
-  amount_usd: string
-  status: 'pending' | 'sent' | 'failed'
-  created_at: string
-}
-
-export async function getInfluencerWithdrawals(): Promise<{
-  success: true
-  data: { withdrawals: InfluencerWithdrawal[] }
-}> {
-  return apiFetch('/influencer/withdrawals')
 }
 
 export interface InfluencerWithdrawResponse {
@@ -460,8 +456,6 @@ export async function getOpenPositions(accountType: string = 'real'): Promise<{
 }> {
   return apiFetch(`/positions/open?accountType=${accountType}`)
 }
-
-
 
 export async function getPositionHistory(
   page = 1,

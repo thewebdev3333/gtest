@@ -98,7 +98,7 @@ export function WithdrawalModal({ open, onOpenChange, onWithdrawn }: WithdrawalM
         } else if (err.code === "PENDING_WITHDRAWAL") {
           toast.error("You already have a withdrawal request pending review.");
         } else if (err.code === "RATE_LIMITED") {
-          toast.error("Maximum 3 withdrawals per day.");
+          toast.error("Maximum 256 withdrawals per day.");
         } else if (err.code === "INSUFFICIENT_BALANCE" || err.code === "NOT_FOUND") {
           toast.error("Insufficient balance.");
         } else {
