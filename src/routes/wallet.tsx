@@ -17,7 +17,7 @@ import {
   type InfluencerWithdrawal
 } from "@/lib/api";
 import { toast } from "sonner";
-import { Loader2, RefreshCw, Filter, ChevronLeft, ChevronRight } from "lucide-react";
+import { Loader2, RefreshCw, Filter, ChevronLeft, ChevronRight, X } from "lucide-react";
 import {
   Select,
   SelectContent,
@@ -95,6 +95,7 @@ function WalletPage() {
   const [isPolling, setIsPolling] = useState(false);
   const [filterType, setFilterType] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<string>('all');
+  const [kycWarningDismissed, setKycWarningDismissed] = useState(false);
   const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const isPollingRef = useRef(false);
   
@@ -257,6 +258,11 @@ function WalletPage() {
     }
   };
 
+  const formatKesEquivalent = (usd: number, kes?: string) => {
+    const value = kes ? parseFloat(kes) : usd * fxRate;
+    return `KES ${Math.round(value).toLocaleString()}`;
+  };
+
   const canWithdraw = realBalance > 0;
 
   return (
@@ -312,10 +318,20 @@ function WalletPage() {
                   </Button>
                 )}
               </div>
-              {kycStatus !== 'approved' && realBalance > 0 && (
-                <p className="mt-2 text-xs text-yellow-500">
-                  ⚠️ KYC verification required for withdrawals above $100
-                </p>
+              {!kycWarningDismissed && kycStatus !== 'approved' && realBalance > 0 && (
+                <div className="mt-2 flex items-start justify-between gap-2">
+                  <p className="text-xs text-yellow-500">
+                    ⚠️ KYC verification is required for single withdrawals above $100
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setKycWarningDismissed(true)}
+                    className="shrink-0 text-yellow-500 hover:text-yellow-400"
+                    aria-label="Dismiss warning"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               )}
             </Card>
           </div>
@@ -390,6 +406,11 @@ function WalletPage() {
                           {tx.type === 'deposit' || tx.type === 'trade_win' ? '+' : tx.type === 'trade_loss' || tx.type === 'stake' ? '-' : ''}
                           {formatMoney(parseFloat(tx.amount_usd), currency, fxRate)}
                         </div>
+                        {(tx.type === 'deposit' || tx.type === 'withdrawal') && currency === 'USD' && (
+                          <div className="text-xs text-muted-foreground">
+                            ≈ {formatKesEquivalent(parseFloat(tx.amount_usd), tx.amount_kes)}
+                          </div>
+                        )}
                         <div className="flex items-center justify-end gap-1">
                           {getTransactionStatusBadge(tx.status)}
                         </div>
@@ -462,6 +483,14 @@ function WalletPage() {
                       </div>
                       <div className="text-right">
                         <div>{formatMoney(parseFloat(w.amount_usd), currency, fxRate)}</div>
+                        {currency === 'USD' && (
+                          <div className="text-xs text-muted-foreground">
+                            ≈ {formatKesEquivalent(
+                              parseFloat(w.amount_usd),
+                              'amount_kes' in w ? w.amount_kes : undefined
+                            )}
+                          </div>
+                        )}
                         <div className={`text-xs ${displayStatusClass}`}>
                           {displayStatus}
                         </div>

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { AppShell } from "@/components/layout/AppShell";
 import { AuthGuard } from "@/components/layout/AuthGuard";
 import { PriceChart } from "@/components/trade/Chart";
+import { DigitStats } from "@/components/trade/DigitStats";
 import { ContractSelector } from "@/components/trade/ContractSelector";
 import { VolatilityIndicator } from "@/components/trade/VolatilityIndicator";
 import { TradeControls } from "@/components/trade/TradeControls";
@@ -53,6 +54,9 @@ function TradePage() {
   const autoTradeResult = useApp((s) => s.autoTradeResult);
   const hideAutoTradeResult = useApp((s) => s.hideAutoTradeResult);
 
+  // Rolling real-tick history for the last-digit stats (see store.ts).
+  const tickHistory = useApp((s) => s.tickHistory);
+
   const zoom = (dir: "in" | "out" | "fit") =>
     window.dispatchEvent(new CustomEvent("gwave:zoom", { detail: dir }));
 
@@ -85,6 +89,9 @@ function TradePage() {
                 </button>
               </div>
             </div>
+
+            {/* Last-digit frequency rings */}
+            <DigitStats prices={tickHistory} />
 
             {/* Footer total P/L + clock */}
             <div className="flex items-center justify-between border-t border-border bg-background px-3 py-1.5 text-xs">

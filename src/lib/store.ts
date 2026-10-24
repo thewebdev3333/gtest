@@ -42,6 +42,15 @@ export const VOLATILITIES: { id: VolatilityId; name: string; vol: number }[] = [
   { id: "v25_1s", name: "Volatility 25 (1s) Index", vol: 0.25 },
 ];
 
+// Rolling window of real market ticks (current symbol only) used by the
+// last-digit stats on the trade page. Synthetic fallback prices are not
+// recorded here on purpose.
+const TICK_HISTORY_MAX = 1000;
+const appendTick = (history: number[], price: number): number[] =>
+  history.length >= TICK_HISTORY_MAX
+    ? [...history.slice(history.length - TICK_HISTORY_MAX + 1), price]
+    : [...history, price];
+
 export const CONTRACTS: { id: ContractType; label: string }[] = [
   { id: "rise_fall", label: "Rise/Fall" },
   { id: "over_under", label: "Over/Under" },
@@ -185,11 +194,11 @@ interface AppState {
   realBalance: number;
   deposit: (usd: number, to: AccountKind) => void;
   isAuthenticated: boolean;
-  user: { id: string; email: string; name: string } | null;
+  user: { id: string; email: string; name: string; displayName?: string } | null;
   // Populated from /auth/me (see fetchUserData). Null until the first
   // fetch resolves, so treat null as "unknown" rather than "regular user".
   role: 'user' | 'support' | 'admin' | 'tech' | 'influencer' | null;
-  setAuthenticated: (status: boolean, user?: { id: string; email: string; name: string }) => void;
+  setAuthenticated: (status: boolean, user?: { id: string; email: string; name: string; displayName?: string }) => void;
   logout: () => void;
   volatility: VolatilityId;
   setVolatility: (v: VolatilityId) => void;
@@ -197,6 +206,7 @@ interface AppState {
   setContract: (c: ContractType) => void;
   price: number;
   prevPrice: number;
+  tickHistory: number[];
   setPrice: (p: number) => void;
   resetPrice: (p: number) => void;
   trades: Trade[];
@@ -260,7 +270,7 @@ function savePrefs(s: AppState) {
   );
 }
 
-function loadAuth(): { isAuthenticated: boolean; user: { id: string; email: string; name: string } | null } {
+function loadAuth(): { isAuthenticated: boolean; user: { id: string; email: string; name: string; displayName?: string } | null } {
   if (typeof window === "undefined") return { isAuthenticated: false, user: null };
   try {
     return JSON.parse(sessionStorage.getItem(AUTH_KEY) || '{"isAuthenticated":false,"user":null}');
@@ -269,7 +279,7 @@ function loadAuth(): { isAuthenticated: boolean; user: { id: string; email: stri
   }
 }
 
-function saveAuth(isAuthenticated: boolean, user: { id: string; email: string; name: string } | null) {
+function saveAuth(isAuthenticated: boolean, user: { id: string; email: string; name: string; displayName?: string } | null) {
   if (typeof window === "undefined") return;
   sessionStorage.setItem(AUTH_KEY, JSON.stringify({ isAuthenticated, user }));
 }
@@ -376,7 +386,7 @@ export const useApp = create<AppState>((set, get) => {
         ws.unsubscribe(prev);
         console.log(`[Store] Unsubscribed from ${prev}`);
       }
-      set({ volatility: v });
+      set({ volatility: v, tickHistory: [] });
       if (ws && get().isConnected) {
         ws.subscribe(v);
         console.log(`[Store] Subscribed to ${v}`);
@@ -387,6 +397,7 @@ export const useApp = create<AppState>((set, get) => {
 
     price: 204.33,
     prevPrice: 204.33,
+    tickHistory: [],
     setPrice: (p) => set((s) => ({ price: p, prevPrice: s.price })),
     resetPrice: (p) => set({ price: p, prevPrice: p }),
 
@@ -420,7 +431,7 @@ export const useApp = create<AppState>((set, get) => {
         const response = await settleTrade(id, exitPrice, accountType);
 
         if (response.success) {
-          const { outcome, pnl, newBalance, accountType: creditedAccountType } = response.data;
+          const { outcome, pnl, newBalance, accountType: creditedAccountType, exitPrice: serverExitPrice } = response.data;
           const won = outcome === 'win';
           // ✅ FIX: use the account type the BACKEND says it credited
           // (derived server-side from contract.account_id), not whatever
@@ -428,8 +439,9 @@ export const useApp = create<AppState>((set, get) => {
           // updating the wrong local balance if the user switched
           // demo/real tabs while this trade was still open.
           const balKey = creditedAccountType === "demo" ? "demoBalance" : "realBalance";
+          const finalExitPrice = serverExitPrice ?? exitPrice;
 
-          const updatedTrade: Trade = { ...t, status: won ? "won" : "lost", exitPrice, pnl };
+          const updatedTrade: Trade = { ...t, status: won ? "won" : "lost", exitPrice: finalExitPrice, pnl };
 
           set((s) => ({
             trades: s.trades.map((x) => (x.id === id ? updatedTrade : x)),
@@ -869,7 +881,7 @@ export const useApp = create<AppState>((set, get) => {
             user: {
               id: user.id,
               email: user.email || '',
-              name: user.name || user.email || 'User',
+              name: user.displayName || user.name || user.email || 'User',
             },
             role: role ?? null,
             kycStatus: kycStatus as any,
@@ -980,6 +992,7 @@ export const useApp = create<AppState>((set, get) => {
           set((s) => ({
             price: data.price,
             prevPrice: s.price,
+            tickHistory: appendTick(s.tickHistory, data.price),
           }));
         }
       });
@@ -994,12 +1007,12 @@ export const useApp = create<AppState>((set, get) => {
   const existing = get().trades.find(t => t.id === data.contractId);
   let updatedTrade: Trade | undefined;
   if (existing && existing.status === 'open') {
-    updatedTrade = {
-      ...existing,
-      status: data.outcome === 'win' ? 'won' : 'lost',
-      exitPrice: data.exitPrice,
-      pnl: data.pnl,
-    };
+      updatedTrade = {
+        ...existing,
+        status: data.outcome === 'win' ? 'won' : 'lost',
+        exitPrice: data.exitPrice,
+        pnl: data.pnl ?? data.pl,
+      };
     set((s) => ({
       trades: s.trades.map((t) => (t.id === data.contractId ? updatedTrade! : t)),
     }));

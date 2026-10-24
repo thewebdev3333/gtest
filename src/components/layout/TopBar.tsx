@@ -25,7 +25,6 @@ export function TopBar() {
   const realBalance = useApp((s) => s.realBalance);
   const currency = useApp((s) => s.currency);
   const fxRate = useApp((s) => s.fxRate);
-  const setCurrency = useApp((s) => s.setCurrency);
   const isAuthenticated = useApp((s) => s.isAuthenticated);
   const logout = useApp((s) => s.logout);
 
@@ -108,11 +107,6 @@ export function TopBar() {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <div className="hidden md:flex items-center rounded-md bg-elevated p-0.5">
-          <CurrencyBtn value="USD" current={currency} onChange={setCurrency} />
-          <CurrencyBtn value="KES" current={currency} onChange={setCurrency} />
-        </div>
-
         {isAuthenticated ? (
           <Button 
             className="bg-primary text-primary-foreground hover:bg-primary/90" 
@@ -131,15 +125,6 @@ export function TopBar() {
       </div>
       <DepositModal open={depositOpen} onOpenChange={setDepositOpen} />
     </header>
-  );
-}
-
-function CurrencyBtn({ value, current, onChange }: { value: Currency; current: Currency; onChange: (c: Currency) => void }) {
-  const active = value === current;
-  return (
-    <button onClick={() => onChange(value)} className={`rounded px-3 py-1 text-xs font-semibold transition ${active ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`}>
-      {value}
-    </button>
   );
 }
 

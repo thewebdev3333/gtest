@@ -68,6 +68,17 @@ function DemoPage() {
     setAccount('demo');
   }, []);
 
+  // Demo mode is only available inside the app after signing up.
+  useEffect(() => {
+    if (!isAuthenticated) {
+      navigate({ to: '/signup' });
+    }
+  }, [isAuthenticated, navigate]);
+
+  if (!isAuthenticated) {
+    return null;
+  }
+
   const goToRealTrading = () => {
     if (isAuthenticated) {
       navigate({ to: '/trade' });

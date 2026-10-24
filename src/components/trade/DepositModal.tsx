@@ -20,11 +20,19 @@ export function DepositModal({
 }) {
   const [phone, setPhone] = useState("");
   const [amount, setAmount] = useState("10");
+  const [bankName, setBankName] = useState("");
+  const [accountName, setAccountName] = useState("");
+  const [accountNumber, setAccountNumber] = useState("");
+  const [paypalEmail, setPaypalEmail] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const deposit = useApp((s) => s.deposit);
   const account = useApp((s) => s.account);
   const fetchBalances = useApp((s) => s.fetchBalances);
   const fxRate = useApp((s) => s.fxRate);
+
+  const notAvailable = (method: "Bank" | "PayPal") => {
+    toast.error(`${method} deposits are not available yet. Please use M-Pesa.`);
+  };
 
   const submitMpesa = async () => {
     let cleanPhone = phone.replace(/\s/g, '')
@@ -136,11 +144,86 @@ export function DepositModal({
               {submitting ? "Awaiting confirmation…" : `Send STK Push (KES ${Math.round(Number(amount) * fxRate).toLocaleString()})`}
             </Button>
           </TabsContent>
-          <TabsContent value="bank" className="pt-6 text-center text-sm text-muted-foreground">
-            Bank transfers coming soon
+          <TabsContent value="bank" className="space-y-3 pt-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="bank-account-name">Account holder name</Label>
+              <Input
+                id="bank-account-name"
+                placeholder="John Doe"
+                value={accountName}
+                onChange={(e) => setAccountName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="bank-name">Bank name</Label>
+              <Input
+                id="bank-name"
+                placeholder="Equity Bank"
+                value={bankName}
+                onChange={(e) => setBankName(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="bank-account-number">Account number</Label>
+              <Input
+                id="bank-account-number"
+                placeholder="0123456789"
+                value={accountNumber}
+                onChange={(e) => setAccountNumber(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="bank-amt">Amount (USD)</Label>
+              <Input
+                id="bank-amt"
+                type="number"
+                min={1}
+                step={1}
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                ≈ KES {Math.round(Number(amount) * fxRate).toLocaleString()}
+              </p>
+            </div>
+            <Button
+              onClick={() => notAvailable("Bank")}
+              className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              Continue with bank transfer
+            </Button>
           </TabsContent>
-          <TabsContent value="paypal" className="pt-6 text-center text-sm text-muted-foreground">
-            PayPal deposits coming soon
+          <TabsContent value="paypal" className="space-y-3 pt-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="paypal-email">PayPal email</Label>
+              <Input
+                id="paypal-email"
+                type="email"
+                placeholder="you@example.com"
+                value={paypalEmail}
+                onChange={(e) => setPaypalEmail(e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="paypal-amt">Amount (USD)</Label>
+              <Input
+                id="paypal-amt"
+                type="number"
+                min={1}
+                step={1}
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                ≈ KES {Math.round(Number(amount) * fxRate).toLocaleString()}
+              </p>
+            </div>
+            <Button
+              onClick={() => notAvailable("PayPal")}
+              className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              Continue with PayPal
+            </Button>
           </TabsContent>
         </Tabs>
       </DialogContent>

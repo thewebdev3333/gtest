@@ -85,6 +85,11 @@ export interface User {
   id: string
   email: string
   name?: string
+  displayName?: string
+  role?: string
+  accountType?: string
+  demoBalance?: number
+  realBalance?: number
 }
 
 export interface AuthResponse {
@@ -482,6 +487,7 @@ export interface SettleTradeResponse {
   data: {
     contractId: string
     outcome: 'win' | 'loss'
+    exitPrice?: number
     pnl: number
     newBalance: number
     accountType: 'demo' | 'real'
@@ -496,7 +502,7 @@ export async function settleTrade(
 ): Promise<SettleTradeResponse> {
   return apiFetch<SettleTradeResponse>(`/trade/settle/${contractId}`, {
     method: 'POST',
-    body: JSON.stringify({ exitPrice, accountType }),
+    body: JSON.stringify({}),
   })
 }
 

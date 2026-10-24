@@ -4,9 +4,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { useApp, formatMoney } from "@/lib/store";
 import { withdrawMpesa, requestInfluencerWithdrawal, ApiError } from "@/lib/api";
+import { X } from "lucide-react";
 
 interface WithdrawalModalProps {
   open: boolean;
@@ -17,6 +19,11 @@ interface WithdrawalModalProps {
 export function WithdrawalModal({ open, onOpenChange, onWithdrawn }: WithdrawalModalProps) {
   const [amount, setAmount] = useState("");
   const [phone, setPhone] = useState("");
+  const [bankName, setBankName] = useState("");
+  const [accountName, setAccountName] = useState("");
+  const [accountNumber, setAccountNumber] = useState("");
+  const [paypalEmail, setPaypalEmail] = useState("");
+  const [warningDismissed, setWarningDismissed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const realBalance = useApp((s) => s.realBalance);
   const currency = useApp((s) => s.currency);
@@ -34,8 +41,17 @@ export function WithdrawalModal({ open, onOpenChange, onWithdrawn }: WithdrawalM
   useEffect(() => {
     if (open) {
       fetchBalances();
+      setWarningDismissed(false);
     }
   }, [open]);
+
+  const notAvailable = (method: "Bank" | "PayPal") => {
+    toast.error(`${method} withdrawals are not available yet. Please use M-Pesa.`);
+  };
+
+  const kesAmount = Number.isFinite(Number(amount))
+    ? Math.round(Number(amount) * fxRate)
+    : 0;
 
   const handleWithdraw = async () => {
     const usdAmount = Number(amount);
@@ -142,43 +158,112 @@ export function WithdrawalModal({ open, onOpenChange, onWithdrawn }: WithdrawalM
               onChange={(e) => setAmount(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
+              ≈ KES {kesAmount.toLocaleString()}
+            </p>
+            <p className="text-xs text-muted-foreground">
               Minimum withdrawal: $10 · Withdrawals are processed within 1-2 business days
             </p>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="withdraw-phone">M-Pesa Phone Number</Label>
-            <Input
-              id="withdraw-phone"
-              type="tel"
-              placeholder="07XXXXXXXX"
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-            />
-          </div>
+          <Tabs defaultValue="mpesa">
+            <TabsList className="grid w-full grid-cols-3">
+              <TabsTrigger value="mpesa">M-Pesa</TabsTrigger>
+              <TabsTrigger value="bank">Bank</TabsTrigger>
+              <TabsTrigger value="paypal">PayPal</TabsTrigger>
+            </TabsList>
+            <TabsContent value="mpesa" className="space-y-3 pt-4">
+              <div className="space-y-2">
+                <Label htmlFor="withdraw-phone">M-Pesa Phone Number</Label>
+                <Input
+                  id="withdraw-phone"
+                  type="tel"
+                  placeholder="07XXXXXXXX"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                />
+              </div>
+              <Button
+                onClick={handleWithdraw}
+                disabled={submitting}
+                className="w-full"
+              >
+                {submitting
+                  ? "Processing..."
+                  : `Withdraw ${amount ? `$${Number(amount).toFixed(2)} (≈ KES ${kesAmount.toLocaleString()})` : ''}`}
+              </Button>
+            </TabsContent>
+            <TabsContent value="bank" className="space-y-3 pt-4">
+              <div className="space-y-2">
+                <Label htmlFor="withdraw-bank-account-name">Account holder name</Label>
+                <Input
+                  id="withdraw-bank-account-name"
+                  placeholder="John Doe"
+                  value={accountName}
+                  onChange={(e) => setAccountName(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="withdraw-bank-name">Bank name</Label>
+                <Input
+                  id="withdraw-bank-name"
+                  placeholder="Equity Bank"
+                  value={bankName}
+                  onChange={(e) => setBankName(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="withdraw-bank-account-number">Account number</Label>
+                <Input
+                  id="withdraw-bank-account-number"
+                  placeholder="0123456789"
+                  value={accountNumber}
+                  onChange={(e) => setAccountNumber(e.target.value)}
+                />
+              </div>
+              <Button onClick={() => notAvailable("Bank")} className="w-full">
+                Withdraw to bank
+              </Button>
+            </TabsContent>
+            <TabsContent value="paypal" className="space-y-3 pt-4">
+              <div className="space-y-2">
+                <Label htmlFor="withdraw-paypal-email">PayPal email</Label>
+                <Input
+                  id="withdraw-paypal-email"
+                  type="email"
+                  placeholder="you@example.com"
+                  value={paypalEmail}
+                  onChange={(e) => setPaypalEmail(e.target.value)}
+                />
+              </div>
+              <Button onClick={() => notAvailable("PayPal")} className="w-full">
+                Withdraw to PayPal
+              </Button>
+            </TabsContent>
+          </Tabs>
 
-          <div className="space-y-2">
-            <Button
-              onClick={handleWithdraw}
-              disabled={submitting}
-              className="w-full"
-            >
-              {submitting ? "Processing..." : `Withdraw ${amount ? `$${Number(amount).toFixed(2)}` : ''}`}
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => onOpenChange(false)}
-              className="w-full"
-            >
-              Cancel
-            </Button>
-          </div>
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            className="w-full"
+          >
+            Cancel
+          </Button>
 
-          <div className="rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-3">
-            <p className="text-xs text-muted-foreground">
-              ⚠️ Withdrawals require KYC verification. Please ensure your KYC is approved before requesting a withdrawal.
-            </p>
-          </div>
+          {!warningDismissed && (
+            <div className="flex items-start justify-between gap-2 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-3">
+              <p className="text-xs text-muted-foreground">
+                ⚠️ KYC verification is required for single withdrawals above $100.
+              </p>
+              <button
+                type="button"
+                onClick={() => setWarningDismissed(true)}
+                className="shrink-0 text-muted-foreground hover:text-foreground"
+                aria-label="Dismiss warning"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>
