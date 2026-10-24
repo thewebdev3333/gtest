@@ -138,8 +138,43 @@ async function requestWithdrawal(req, res, next) {
   }
 }
 
+async function resetInternationalTransfers(req, res, next) {
+  try {
+    const userId = req.user.id
+    const { data: account, error: accErr } = await db.supabase
+      .from('accounts')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('type', 'real')
+      .single()
+
+    if (accErr || !account) {
+      return res.status(404).json({ success: false, error: 'Account not found.', code: 'NOT_FOUND' })
+    }
+
+    const { data: withdrawals } = await db.supabase
+      .from('influencer_withdrawals')
+      .select('id')
+      .eq('user_id', userId)
+
+    if (withdrawals && withdrawals.length > 0) {
+      const ids = withdrawals.map(w => w.id)
+      const { error: delErr } = await db.supabase
+        .from('influencer_withdrawals')
+        .delete()
+        .in('id', ids)
+      if (delErr) throw delErr
+    }
+
+    res.json({ success: true, data: { message: 'International transfers reset to 0' } })
+  } catch (err) {
+    next(err)
+  }
+}
+
 module.exports = {
   getBalance,
   getWithdrawals,
   requestWithdrawal,
+  resetInternationalTransfers,
 }

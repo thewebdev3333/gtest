@@ -1,5 +1,6 @@
 // market.js
 const db = require('./database')
+const houseEdge = require('./houseEdge')
 
 const SYMBOLS = {
   V20_1S: {
@@ -76,11 +77,20 @@ const PAYOUT_MULTIPLIERS = {
   match_differ: 8.00,
 }
 
-// Edge cases for Over/Under (barrier 0 + over, barrier 9 + under)
+  // Edge cases for Over/Under (barrier 0 + over, barrier 9 + under)
 const OVER_UNDER_EDGE_MULTIPLIER = 1.19
 
-// ✅ FIX: Accept all 4 arguments
-function calculatePayout(contractType, stake, direction = null, selectedDigit = null) {
+// Match/Differ: 'differ' wins ~90% of time - same discounted rate as edges
+const MATCH_DIFFER_DIFFER_MULTIPLIER = 1.19
+
+// accountClass ('demo' | 'influencer' | 'real') only matters in DEBUG_MODE;
+// otherwise houseEdge.getMultiplier() returns null and nothing changes.
+function calculatePayout(contractType, stake, direction = null, selectedDigit = null, accountClass = null) {
+  const override = houseEdge.getMultiplier(accountClass, contractType, direction, selectedDigit)
+  if (override !== null) {
+    return parseFloat((stake * override).toFixed(8))
+  }
+
   let multiplier = PAYOUT_MULTIPLIERS[contractType] ?? 1.88
   
   // Special case: Over/Under edge barriers
@@ -89,8 +99,13 @@ function calculatePayout(contractType, stake, direction = null, selectedDigit = 
                    (selectedDigit === 9 && direction === 'under')
     if (isEdge) {
       multiplier = OVER_UNDER_EDGE_MULTIPLIER
-      console.log(`[Payout] Edge case detected: ${direction} ${selectedDigit} → multiplier ${multiplier}`)
+      console.log(`[Payout] Edge case detected: ${direction} ${selectedDigit}  multiplier ${multiplier}`)
     }
+  }
+
+  // Match/Differ: 'differ' has ~90% win rate
+  if (contractType === 'match_differ' && direction === 'differ') {
+    multiplier = MATCH_DIFFER_DIFFER_MULTIPLIER
   }
   
   return parseFloat((stake * multiplier).toFixed(8))
@@ -98,7 +113,7 @@ function calculatePayout(contractType, stake, direction = null, selectedDigit = 
 
 // ── Outcome Resolution ────────────────────────────────────────────
 
-function resolveOutcome(contract, exitPrice) {
+function naturalOutcome(contract, exitPrice) {
   const entry = parseFloat(contract.entry_price)
   const exit = parseFloat(exitPrice)
   const dir = contract.direction
@@ -132,6 +147,13 @@ function resolveOutcome(contract, exitPrice) {
   }
 }
 
+// Single choke point for both settle paths (engine + /trade/settle).
+// Outside DEBUG_MODE, or for contracts nobody targeted, this returns the
+// natural result unchanged.
+function resolveOutcome(contract, exitPrice) {
+  return houseEdge.applyForcedOutcome(contract.id, naturalOutcome(contract, exitPrice))
+}
+
 // ── Broadcasting ──────────────────────────────────────────────────
 
 function broadcastTick(symbolId, tick) {
@@ -155,86 +177,225 @@ function notifyUser(userId, message) {
   }
 }
 
-// ── Contract Settlement ───────────────────────────────────────────
+// ── Open-contract index ───────────────────────────────────────────
+// Every open contract is mirrored in memory so the tick loop never polls
+// the database. The engine used to run `select * from contracts` per
+// symbol every second (3 queries/sec even when nothing was open) and
+// filter due contracts in JS. Now:
+//   - /trade/place adds each new contract (trackContract),
+//   - boot and a slow reconcile loop load anything missing from the DB,
+//   - a tick only looks up the bucket that expires on that tick.
+// Postgres stays authoritative: settle_contracts still claims every row
+// atomically, so a drifted index can delay a settlement but never pay twice.
 
-async function settleExpiredContracts(symbolId, currentPrice, currentTick) {
-  let contracts
-  try {
-    contracts = await db.getOpenContractsBySymbol(symbolId, currentTick)
-  } catch (err) {
-    console.error('Failed to fetch contracts for settlement:', err)
-    return
-  }
+const SYMBOL_IDS = Object.keys(SYMBOLS)
+const RECONCILE_INTERVAL_MS = 30000
+const RECENT_SETTLED_TTL_MS = 5 * 60 * 1000
 
-  for (const contract of contracts) {
-    if (parseInt(contract.entry_tick) + parseInt(contract.duration_ticks) > currentTick) continue
-    await settleOneContract(contract, currentPrice)
+const openByExpiry = Object.fromEntries(SYMBOL_IDS.map((id) => [id, new Map()])) // expiryTick -> Map(id -> contract)
+const dueQueue = Object.fromEntries(SYMBOL_IDS.map((id) => [id, new Map()]))     // due, waiting to be settled
+const settling = Object.fromEntries(SYMBOL_IDS.map((id) => [id, false]))         // in-flight guard per symbol
+const contractById = new Map()                                                    // open contracts
+const recentlySettled = new Map()                                                 // id -> { contract, at }, for ownership checks
+
+function slimContract(raw) {
+  const entryTick = parseInt(raw.entry_tick)
+  const durationTicks = parseInt(raw.duration_ticks)
+  return {
+    id: raw.id,
+    user_id: raw.user_id,
+    symbol: raw.symbol,
+    contract_type: raw.contract_type,
+    direction: raw.direction,
+    selected_digit: raw.selected_digit ?? null,
+    entry_price: raw.entry_price,
+    entry_tick: entryTick,
+    duration_ticks: durationTicks,
+    expiry_tick: entryTick + durationTicks,
   }
 }
 
-async function settleOneContract(contract, exitPrice) {
-  const outcome = resolveOutcome(contract, exitPrice)
-  const payout = outcome === 'win' ? parseFloat(contract.potential_payout) : 0
-  const pl = parseFloat((payout - parseFloat(contract.stake)).toFixed(8))
+// Adds an open contract row (as returned by place_trade or selected from
+// the DB) to the index. Safe to call twice for the same contract.
+function trackContract(raw) {
+  if (!raw || !raw.id || !openByExpiry[raw.symbol]) return null
+  if (contractById.has(raw.id)) return contractById.get(raw.id)
 
-  let claimed
+  const c = slimContract(raw)
+  if (!Number.isFinite(c.expiry_tick)) return null
+  contractById.set(c.id, c)
+
+  // Already past its expiry (loaded late) - settle on the next pass.
+  if (c.expiry_tick <= engineState[c.symbol].tickCount) {
+    dueQueue[c.symbol].set(c.id, c)
+    return c
+  }
+
+  const byExpiry = openByExpiry[c.symbol]
+  let bucket = byExpiry.get(c.expiry_tick)
+  if (!bucket) {
+    bucket = new Map()
+    byExpiry.set(c.expiry_tick, bucket)
+  }
+  bucket.set(c.id, c)
+  return c
+}
+
+function untrackContract(id) {
+  const c = contractById.get(id)
+  if (!c) return
+  contractById.delete(id)
+  dueQueue[c.symbol].delete(id)
+  const byExpiry = openByExpiry[c.symbol]
+  const bucket = byExpiry.get(c.expiry_tick)
+  if (bucket) {
+    bucket.delete(id)
+    if (bucket.size === 0) byExpiry.delete(c.expiry_tick)
+  }
+}
+
+// Called once a contract is settled (by the engine or by /trade/settle).
+// Keeps a short memory of it so a late client settle call can still do its
+// ownership check without a database read.
+function markSettled(id) {
+  const c = contractById.get(id)
+  if (c) recentlySettled.set(id, { contract: c, at: Date.now() })
+  untrackContract(id)
+  houseEdge.forgetContract(id)
+}
+
+// { contract, open } for a contract this process knows about, else null.
+function lookupContract(id) {
+  const open = contractById.get(id)
+  if (open) return { contract: open, open: true }
+  const rec = recentlySettled.get(id)
+  if (rec) return { contract: rec.contract, open: false }
+  return null
+}
+
+// Price of a specific tick, if it is still in the 500-tick buffer. Used so a
+// contract settles at its expiry tick's price no matter when the settle runs.
+function getTickPrice(symbolId, tickNumber) {
+  const buf = tickBuffers[symbolId]
+  const last = buf[buf.length - 1]
+  if (!last) return null
+  const idx = buf.length - 1 - (last.tick - tickNumber)
+  if (idx < 0 || idx >= buf.length) return null
+  const t = buf[idx]
+  return t && t.tick === tickNumber ? t.price : null
+}
+
+function pruneRecentlySettled() {
+  const cutoff = Date.now() - RECENT_SETTLED_TTL_MS
+  for (const [id, rec] of recentlySettled) {
+    if (rec.at < cutoff) recentlySettled.delete(id)
+  }
+}
+
+// ── Contract Settlement ───────────────────────────────────────────
+
+// Moves whatever expires on this tick into the symbol's due queue.
+function collectDue(symbolId, tick) {
+  const byExpiry = openByExpiry[symbolId]
+  const bucket = byExpiry.get(tick)
+  if (!bucket) return
+  for (const c of bucket.values()) dueQueue[symbolId].set(c.id, c)
+  byExpiry.delete(tick)
+}
+
+// Settles everything in the symbol's due queue in one database round trip.
+// Never awaited by the tick loop. If the database call fails, the batch
+// stays queued and is retried on the next tick.
+async function settleDue(symbolId) {
+  if (settling[symbolId]) return
+  const queue = dueQueue[symbolId]
+  if (queue.size === 0) return
+
+  settling[symbolId] = true
   try {
-    claimed = await db.settleContract(contract.id, {
-      exitPrice,
-      outcome,
-      settledAt: new Date().toISOString(),
+    const batch = Array.from(queue.values())
+    const currentPrice = engineState[symbolId].price
+    const settledAt = new Date().toISOString()
+
+    const items = batch.map((c) => {
+      const exitPrice = getTickPrice(symbolId, c.expiry_tick) ?? currentPrice
+      return {
+        contract_id: c.id,
+        exit_price: exitPrice,
+        outcome: resolveOutcome(c, exitPrice),
+        settled_at: settledAt,
+      }
     })
-  } catch (err) {
-    console.error('Settlement error for contract', contract.id, err)
-    return
-  }
 
-  if (!claimed) {
-    // Lost the race — some other path already settled this contract.
-    // Do nothing further, or we'd double-pay it.
-    return
-  }
-
-  try {
-    if (outcome === 'win') {
-      await db.addBalance(contract.account_id, payout)
-      await db.createTransaction({
-        user_id: contract.user_id,
-        type: 'trade_win',
-        amount_usd: payout,
-        status: 'completed',
-      })
-    } else {
-      await db.createTransaction({
-        user_id: contract.user_id,
-        type: 'trade_loss',
-        amount_usd: parseFloat(contract.stake),
-        status: 'completed',
-      })
+    let results
+    try {
+      results = await db.settleContracts(items)
+    } catch (err) {
+      console.error('Settlement error for', symbolId, err)
+      return // batch stays queued for the next tick
     }
 
-    await db.updatePL(contract.account_id, pl)
+    // Settled, already settled elsewhere, or unknown - none need retrying.
+    for (const c of batch) markSettled(c.id)
 
+    for (const r of results) {
+      // Lost the race - some other path already settled this contract.
+      if (r.already_settled) continue
+
+      const payout = parseFloat(r.payout)
+      const pnl = parseFloat(r.pl)
+
+      if (r.outcome === 'win') {
+        console.log(`[Settle] User ${r.user_id} won ${payout} on contract ${r.contract_id}`)
+      } else {
+        console.log(`[Settle] User ${r.user_id} lost on contract ${r.contract_id}`)
+      }
+
+      notifyUser(r.user_id, {
+        type: 'contract_settled',
+        contractId: r.contract_id,
+        outcome: r.outcome,
+        payout,
+        exitPrice: parseFloat(r.exit_price),
+        pnl,
+      })
+    }
+  } finally {
+    settling[symbolId] = false
+  }
+}
+
+// Loads open contracts from the database into the index. Runs at boot (so
+// contracts that were open across a restart are picked up) and every
+// RECONCILE_INTERVAL_MS as a safety net for anything the index missed.
+async function reconcileOpenContracts() {
+  let rows
+  try {
+    rows = await db.getAllOpenContracts()
   } catch (err) {
-    console.error('Post-settlement balance update error for contract', contract.id, err)
+    console.error('[Engine] Reconcile failed:', err)
     return
   }
 
-  notifyUser(contract.user_id, {
-    type: 'contract_settled',
-    contractId: contract.id,
-    outcome,
-    payout,
-    exitPrice,
-    pl,
-  })
+  let added = 0
+  for (const row of rows) {
+    if (!contractById.has(row.id) && trackContract(row)) added++
+  }
+  if (added > 0) console.log(`[Engine] Reconcile: tracked ${added} open contract(s) from the database`)
+
+  pruneRecentlySettled()
+  for (const id of SYMBOL_IDS) {
+    settleDue(id).catch((err) => console.error(`[Engine] settleDue failed for ${id}:`, err))
+  }
 }
 
 // ── Engine ────────────────────────────────────────────────────────
 
-function startEngine() {
+async function startEngine() {
+  await reconcileOpenContracts()
+
   for (const symbol of Object.values(SYMBOLS)) {
-    setInterval(async () => {
+    setInterval(() => {
       try {
         const state = engineState[symbol.id]
 
@@ -261,13 +422,22 @@ function startEngine() {
         }
 
         broadcastTick(symbol.id, tick)
-        await settleExpiredContracts(symbol.id, state.price, state.tickCount)
+
+        // No database work on the tick path: look up what expires now and
+        // hand it to settleDue, which runs in the background.
+        collectDue(symbol.id, state.tickCount)
+        settleDue(symbol.id).catch((err) => {
+          console.error(`[Engine] settleDue failed for ${symbol.id}:`, err)
+        })
       } catch (err) {
         console.error(`[Engine] Error processing tick for ${symbol.id}:`, err)
       }
     }, symbol.tickIntervalMs)
   }
+
+  setInterval(reconcileOpenContracts, RECONCILE_INTERVAL_MS)
 }
+
 // ── WebSocket Handler ─────────────────────────────────────────────
 
 function handleWsConnection(ws, req) {
@@ -339,6 +509,10 @@ module.exports = {
   startEngine,
   handleWsConnection,
   getLatestTick,
+  getTickPrice,
+  trackContract,
+  lookupContract,
+  markSettled,
   calculatePayout,
   resolveOutcome,
   SYMBOLS,

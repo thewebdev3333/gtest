@@ -2,40 +2,46 @@
 const db = require('./database')
 const { supabaseAuth } = require('./middleware')
 
+// Signup webhook, called by a Supabase database webhook on auth.users
+// insert.
+//
+// The database trigger (see database.sql) already creates the
+// profiles row, both accounts, the KYC submission and the role row, so
+// this endpoint is a second path to the same state rather than the only
+// path. It has to be idempotent for that reason: a plain insert runs
+// into UNIQUE(user_id, type) / UNIQUE(user_id) against the rows the
+// trigger just wrote, which turned this endpoint into a 500 on every
+// signup.
 async function onSignup(req, res) {
   const secret = req.headers['x-supabase-webhook-secret']
-  if (secret !== process.env.SUPABASE_WEBHOOK_SECRET) {
+  if (!process.env.SUPABASE_WEBHOOK_SECRET || secret !== process.env.SUPABASE_WEBHOOK_SECRET) {
     return res.status(401).json({ error: 'Unauthorized' })
   }
 
   const { record } = req.body
-  const userId = record.id
+  const userId = record?.id
+  if (!userId) {
+    return res.status(400).json({ error: 'Missing record.id' })
+  }
 
   try {
-    // Create accounts
-    await db.createUserAccounts(userId)
-    
-    // Create KYC submission record
-    await db.supabase.from('kyc_submissions').insert({
-      user_id: userId,
-      status: 'pending'
-    })
-    
-    // Set default user role
-    await db.supabase.from('user_roles').insert({
-      user_id: userId,
-      role: 'user'
-    })
-    
-    // Check if this is an admin email
-    const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(e => e.trim())
-    if (adminEmails.includes(record.email)) {
-      await db.supabase.from('user_roles').upsert({
-        user_id: userId,
-        role: 'admin'
-      })
+    await db.ensureUserAccounts(userId)
+
+    await db.supabase
+      .from('kyc_submissions')
+      .upsert({ user_id: userId, status: 'pending' }, { onConflict: 'user_id', ignoreDuplicates: true })
+
+    await db.supabase
+      .from('user_roles')
+      .upsert({ user_id: userId, role: 'user' }, { onConflict: 'user_id', ignoreDuplicates: true })
+
+    // Promote allowlisted admin emails - but only once the address has
+    // been confirmed, so a signup with an unverified allowlisted
+    // address can't claim the admin role.
+    if (await db.isEmailConfirmed(userId, record)) {
+      await db.promoteAdminIfAllowlisted(userId, record.email)
     }
-    
+
     res.status(200).json({ success: true })
   } catch (err) {
     console.error('Failed to create accounts for user', userId, err)
@@ -84,8 +90,13 @@ async function updateProfile(req, res, next) {
   try {
     const { name } = req.body
     
-    // Update user metadata using admin API
-    const { data, error } = await supabaseAuth.auth.admin.updateUserById(
+    // Update user metadata using admin API.
+    //
+    // This has to go through the service-role client (db.supabase).
+    // supabaseAuth is built with the anon key, and the admin API
+    // requires a service-role key - calling it with the anon key
+    // returned 401 every time, so the display name never persisted.
+    const { data, error } = await db.supabase.auth.admin.updateUserById(
       req.user.id,
       {
         user_metadata: { display_name: name },

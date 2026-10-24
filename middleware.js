@@ -3,7 +3,9 @@ const helmet = require('helmet')
 const rateLimit = require('express-rate-limit')
 const { createClient } = require('@supabase/supabase-js')
 const { validationResult, body, param, header } = require('express-validator')
+const jwt = require('jsonwebtoken')
 const db = require('./database') // service-role client — used for role checks so RLS doesn't block them
+const { getCachedRole, setCachedRole } = require('./redis')
 
 function securityHeaders() {
   return helmet({
@@ -44,6 +46,10 @@ const supabaseAuth = createClient(
   process.env.SUPABASE_ANON_KEY
 )
 
+// Counters for how requests were authenticated. A growing `fallback` means
+// requests are paying for a network round trip to Supabase Auth.
+const authStats = { local: 0, expired: 0, fallback: 0 }
+
 async function authenticate(req, res, next) {
   const authHeader = req.headers.authorization
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -51,6 +57,40 @@ async function authenticate(req, res, next) {
   }
 
   const token = authHeader.split(' ')[1]
+
+  // Fast path: verify the JWT locally instead of calling Supabase Auth.
+  //
+  // Supabase access tokens are signed with the project's JWT secret —
+  // the same secret the WebSocket layer already verifies against in
+  // market.js. Doing the check in-process removes a network round trip
+  // to Supabase from every authenticated request, and that call was the
+  // single largest latency cost on the trade path.
+  //
+  // If the token can't be verified locally (no secret configured, an
+  // asymmetric signing key, an expired token) we fall back to the
+  // network call, so behaviour is unchanged for anything unusual.
+  const local = verifyTokenDetailed(token)
+  if (local.user) {
+    authStats.local++
+    req.user = local.user
+    req.token = token
+    return next()
+  }
+
+  // Signature was valid but the token has expired: no point asking Supabase
+  // Auth, it would say the same thing after a network round trip.
+  if (local.expired) {
+    authStats.expired++
+    return res.status(401).json({ success: false, error: 'Session expired or invalid.', code: 'TOKEN_EXPIRED' })
+  }
+
+  // Anything else means local verification could not be used at all (no
+  // secret, a non-HS256 signing key, a malformed token). If this fires for
+  // real users it is a network call on every request - see authStats.
+  authStats.fallback++
+  if (authStats.fallback === 1 || authStats.fallback % 100 === 0) {
+    console.warn(`[auth] local JWT verification unavailable (${local.fallback}); using network fallback (count=${authStats.fallback})`)
+  }
 
   const { data: { user }, error } = await supabaseAuth.auth.getUser(token)
 
@@ -63,6 +103,49 @@ async function authenticate(req, res, next) {
   next()
 }
 
+// Verifies a Supabase access token against SUPABASE_JWT_SECRET without
+// touching the network. Returns null when the token can't be verified
+// locally, which is the signal to fall back to the network path.
+function verifyTokenLocally(token) {
+  return verifyTokenDetailed(token).user || null
+}
+
+// Same check, but says why it failed: { user } | { expired: true } | { fallback: reason }.
+function verifyTokenDetailed(token) {
+  const secret = process.env.SUPABASE_JWT_SECRET
+  if (!secret) return { fallback: 'no-secret' }
+  try {
+    const payload = jwt.verify(token, secret, { algorithms: ['HS256'] })
+    if (!payload || !payload.sub) return { fallback: 'no-sub' }
+    return { user: { id: payload.sub, email: payload.email || null } }
+  } catch (err) {
+    // jsonwebtoken checks the signature before the expiry, so this is a
+    // genuine, correctly signed token that has simply run out.
+    if (err && err.name === 'TokenExpiredError') return { expired: true }
+    return { fallback: (err && err.name) || 'verify-failed' }
+  }
+}
+
+// Role lookup with a short-lived Redis cache in front of the database.
+// user_roles is read on every admin request but changes rarely, so a
+// 60s TTL (plus explicit invalidation when a role is changed) removes a
+// database round trip without making permission changes sluggish.
+async function resolveRole(userId) {
+  const cached = await getCachedRole(userId)
+  if (cached) return cached
+
+  const { data, error } = await db.supabase
+    .from('user_roles')
+    .select('role')
+    .eq('user_id', userId)
+    .single()
+
+  if (error || !data) return null
+
+  await setCachedRole(userId, data.role)
+  return data.role
+}
+
 function requireRole(role) {
   return async (req, res, next) => {
     try {
@@ -73,20 +156,20 @@ function requireRole(role) {
       // silently rejected with 403 even for real admins. The login route in
       // server.js already uses `db.supabase` for this exact check, so this
       // keeps the two role checks consistent.
-      const { data, error } = await db.supabase
-        .from('user_roles')
-        .select('role')
-        .eq('user_id', req.user.id)
-        .single()
-      
-      if (error || !data || data.role !== role) {
-        return res.status(403).json({ 
-          success: false, 
-          error: 'Admin access required.', 
-          code: 'FORBIDDEN' 
+      //
+      // The result is cached in Redis for 60s (see resolveRole). The cache
+      // is keyed by user id and is invalidated explicitly by
+      // admin.setUserRole, so a demotion takes effect immediately.
+      const userRole = await resolveRole(req.user.id)
+
+      if (!userRole || userRole !== role) {
+        return res.status(403).json({
+          success: false,
+          error: 'Admin access required.',
+          code: 'FORBIDDEN'
         })
       }
-      
+
       req.isAdmin = true
       next()
     } catch (err) {
@@ -148,21 +231,30 @@ function checkIdempotency() {
     // raw client key is reused.
     const key = `${req.method}:${req.path}:${rawKey}`
 
-    const { data, error } = await supabaseAuth
+    // These two queries have to run through the service-role client.
+    // `supabaseAuth` is built with the anon key and never carries the
+    // caller's JWT, so it connects as an unauthenticated role - and with
+    // RLS on `idempotency_keys` (policy: auth.uid() = user_id) it saw
+    // no rows on read and was rejected on write. The result was that the
+    // idempotency guard never matched a replayed request and never
+    // stored a response, so a retried deposit or withdrawal went
+    // through a second time.
+    const { data } = await db.supabase
       .from('idempotency_keys')
       .select('response, created_at')
       .eq('key', key)
       .eq('user_id', req.user.id)
       .gt('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
-      .single()
-    
-    if (data) {
-      return res.status(200).json(data.response)
+      .limit(1)
+
+    const cached = data && data[0]
+    if (cached) {
+      return res.status(200).json(cached.response)
     }
     
     req.idempotencyKey = key
     req.idempotencyStore = (response) => {
-      return supabaseAuth.from('idempotency_keys').insert({
+      return db.supabase.from('idempotency_keys').insert({
         key,
         user_id: req.user.id,
         response,
@@ -257,6 +349,9 @@ module.exports = {
   apiLimiter,
   withdrawalLimiter,
   authenticate,
+  verifyTokenLocally,
+  authStats,
+  resolveRole,
   requireRole,
   requireOwnership,
   validate,

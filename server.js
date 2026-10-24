@@ -11,13 +11,26 @@ const db = require('./database')
 const mw = require('./middleware')
 const auth = require('./auth')
 const wallet = require('./wallet')
+const payments = require('./payments')
 const market = require('./market')
+const houseEdge = require('./houseEdge')
 const admin = require('./admin')
 const exchange = require('./exchange')
 const influencer = require('./influencer')
+const redis = require('./redis')
 
 const app = express()
 const httpServer = http.createServer(app)
+
+// Behind a reverse proxy every request arrives from the proxy's IP, so
+// without this the rate limiter counts ALL users as one client. Set
+// TRUST_PROXY to the number of proxy hops in front of the app (usually 1).
+// Left unset it does nothing, which is correct when there is no proxy:
+// trusting X-Forwarded-For with no proxy lets clients spoof their IP.
+if (process.env.TRUST_PROXY) {
+  const v = process.env.TRUST_PROXY
+  app.set('trust proxy', /^\d+$/.test(v) ? parseInt(v, 10) : v === 'true' ? true : v === 'false' ? false : v)
+}
 
 // ── Global middleware ──────────────────────────────────────────────
 
@@ -26,6 +39,9 @@ app.use(cors(mw.corsOptions))
 app.use(express.json({ limit: '10kb' }))
 app.use(morgan('combined'))
 app.use(mw.apiLimiter)
+
+// Debug page gate: must come before static serving (see houseEdge.js).
+houseEdge.registerPageGate(app)
 
 //static file serving
 app.use(express.static('public'));
@@ -36,7 +52,8 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    uptime: process.uptime()
+    uptime: process.uptime(),
+    redis: redis.isReady() ? 'up' : 'down'
   })
 })
 
@@ -68,13 +85,24 @@ app.post('/admin/login', async (req, res) => {
     }
 
     // Check if user has a role allowed through this login form
-    const { data: roleData, error: roleError } = await db.supabase
-      .from('user_roles')
-      .select('role')
-      .eq('user_id', data.user.id)
-      .single();
+    let role = await db.getUserRole(data.user.id)
 
-    if (roleError || !roleData || !['admin', 'influencer'].includes(roleData.role)) {
+    // Emails on the ADMIN_EMAILS allowlist are promoted to admin on
+    // first login. The signup trigger can't read .env, and the signup
+    // webhook isn't guaranteed to fire, so without this the first
+    // admin would have to be promoted by hand - and there'd be no way
+    // to sign in to do it, since only an admin can change roles.
+    if (role !== 'admin' && role !== 'influencer' && db.isAdminEmail(data.user.email)) {
+      // Only promote an address that has actually been confirmed, so a
+      // signup with an unverified allowlisted address can't claim the
+      // admin role.
+      if (await db.isEmailConfirmed(data.user.id, data.user)) {
+        await db.promoteAdminIfAllowlisted(data.user.id, data.user.email)
+        role = 'admin'
+      }
+    }
+
+    if (!role || !['admin', 'influencer'].includes(role)) {
       await mw.supabaseAuth.auth.signOut();
       return res.status(403).json({
         success: false,
@@ -82,6 +110,10 @@ app.post('/admin/login', async (req, res) => {
         code: 'FORBIDDEN'
       });
     }
+
+    // Warm the role cache so the first admin request doesn't have to hit
+    // the database for it.
+    await redis.setCachedRole(data.user.id, role);
 
     // Get display name - simple approach with fallback, never crashes
     let displayName = data.user.email?.split('@')[0] || 'User';
@@ -102,7 +134,7 @@ app.post('/admin/login', async (req, res) => {
         user: {
           id: data.user.id,
           email: data.user.email,
-          role: roleData.role,
+          role: role,
           displayName: displayName
         }
       }
@@ -124,41 +156,91 @@ app.get('/auth/me', mw.authenticate, auth.getMe)
 app.patch('/auth/profile', mw.authenticate, mw.validators.updateProfile, mw.validate, auth.updateProfile)
 app.get('/auth/profile', mw.authenticate, auth.getProfile)
 
+// ── Trade timing (opt-in) ──────────────────────────────────────────
+// TRADE_TIMING=true logs one line per trade request with the time spent in
+// each stage, e.g.  [timing] POST /trade/place total=212ms auth+validate=3ms account=1ms rpc=207ms
+const TRADE_TIMING = process.env.TRADE_TIMING === 'true'
+
+function tradeTiming() {
+  return (req, res, next) => {
+    if (!TRADE_TIMING) return next()
+    const start = process.hrtime.bigint()
+    let last = start
+    const parts = []
+    req.timing = {
+      mark(name) {
+        const now = process.hrtime.bigint()
+        parts.push(`${name}=${Math.round(Number(now - last) / 1e6)}ms`)
+        last = now
+      },
+    }
+    res.on('finish', () => {
+      const total = Math.round(Number(process.hrtime.bigint() - start) / 1e6)
+      console.log(`[timing] ${req.method} ${req.path} total=${total}ms ${parts.join(' ')}`)
+    })
+    next()
+  }
+}
+
+const mark = (req, name) => { if (req.timing) req.timing.mark(name) }
+
 // ── Trade routes ───────────────────────────────────────────────────
 
 app.get('/trade/symbols', (req, res) => {
   res.json({ success: true, data: { symbols: Object.values(market.SYMBOLS) } })
 })
 
-app.get('/trade/payout-preview', (req, res) => {
-  const { contractType, stake, direction, selectedDigit } = req.query
-  if (!contractType || !stake) {
-    return res.status(400).json({ 
-      success: false, 
-      error: 'contractType and stake required.', 
-      code: 'VALIDATION_ERROR' 
+// Outside DEBUG_MODE (accountClass === null) this is exactly the original
+// parsing, which turns a numeric 0 into null (0 is falsy). In debug mode 0 is
+// kept as a real barrier so the house-edge maths prices it correctly.
+const parseDigit = (v, accountClass) => {
+  if (accountClass) return v === undefined || v === null || v === '' ? null : parseInt(v)
+  return v ? parseInt(v) : null
+}
+
+app.get('/trade/payout-preview', async (req, res, next) => {
+  try {
+    const { contractType, stake, direction, selectedDigit, accountType } = req.query
+    if (!contractType || !stake) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'contractType and stake required.', 
+        code: 'VALIDATION_ERROR' 
+      })
+    }
+    // Account class only matters in DEBUG_MODE (null otherwise).
+    const accountClass = await houseEdge.resolveClass({
+      accountType,
+      userId: houseEdge.optionalUserId(req),
     })
-  }
-  const payout = market.calculatePayout(contractType, parseFloat(stake), direction, selectedDigit ? parseInt(selectedDigit) : null)
-  res.json({ success: true, data: { potentialPayout: payout } })
+    const payout = market.calculatePayout(contractType, parseFloat(stake), direction, parseDigit(selectedDigit, accountClass), accountClass)
+    res.json({ success: true, data: { potentialPayout: payout } })
+  } catch (err) { next(err) }
 })
 
 app.post('/trade/place', 
+  tradeTiming(),
   mw.authenticate, 
   mw.validators.placeTrade, 
   mw.validate, 
   async (req, res, next) => {
     try {
       const { accountType, symbol, contractType, direction, selectedDigit, stake, durationTicks } = req.body
+      mark(req, 'auth+validate')
 
-      const account = await db.getAccountByUserAndType(req.user.id, accountType)
-      if (!account) {
+      // Only the account id is needed here, and that comes from the
+      // Redis cache (falling back to the database on a miss), so the
+      // trade path doesn't have to fetch the account row.
+      const accountId = await db.getAccountIdByUserAndType(req.user.id, accountType)
+      if (!accountId) {
         return res.status(404).json({ 
           success: false, 
           error: 'Account not found.', 
           code: 'NOT_FOUND' 
         })
       }
+
+      mark(req, 'account')
 
       const tick = market.getLatestTick(symbol)
       if (!tick) {
@@ -169,28 +251,39 @@ app.post('/trade/place',
         })
       }
 
-      const potentialPayout = market.calculatePayout(contractType, stake, direction, selectedDigit)
+      // Account class only matters in DEBUG_MODE (null otherwise).
+      const accountClass = await houseEdge.resolveClass({ accountType, userId: req.user.id })
+      const potentialPayout = market.calculatePayout(contractType, parseFloat(stake), direction, parseDigit(selectedDigit, accountClass), accountClass)
 
-      await db.deductBalance(account.id, stake)
-      await db.createTransaction({ 
-        user_id: req.user.id, 
-        type: 'stake', 
-        amount_usd: stake, 
-        status: 'completed' 
-      })
-
-      const contract = await db.createContract({
-        user_id: req.user.id,
-        account_id: account.id,
+      // Deduct + record the stake + create the contract in one round trip
+      // (place_trade does all three in a single transaction, so the stake
+      // can no longer be deducted without a contract being created).
+      const contract = await db.placeTrade({
+        userId: req.user.id,
+        accountId,
         symbol,
-        contract_type: contractType,
+        contractType,
         direction,
-        selected_digit: selectedDigit ?? null,
-        stake,
-        potential_payout: potentialPayout,
-        entry_price: tick.price,
-        entry_tick: tick.tick,
-        duration_ticks: durationTicks,
+        selectedDigit: selectedDigit ?? null,
+        stake: parseFloat(stake),
+        potentialPayout,
+        entryPrice: tick.price,
+        entryTick: tick.tick,
+        durationTicks: parseInt(durationTicks),
+      })
+      mark(req, 'rpc')
+
+      // Mirror the new contract in the engine's in-memory index so expiry
+      // is detected without polling the database.
+      market.trackContract(contract)
+
+      // DEBUG_MODE only: decide now whether this trade is a forced win/loss,
+      // so every settle path agrees. No-op unless an admin targeted this account.
+      houseEdge.registerContract({
+        contractId: contract.id,
+        userId: req.user.id,
+        accountType,
+        accountClass,
       })
 
       res.json({
@@ -200,11 +293,11 @@ app.post('/trade/place',
           entryPrice: tick.price,
           entryTick: tick.tick,
           potentialPayout,
-          expiresAtTick: tick.tick + durationTicks,
+          expiresAtTick: tick.tick + parseInt(durationTicks),
         },
       })
     } catch (err) {
-      if (err.message === 'INSUFFICIENT_BALANCE') {
+      if (err.message && err.message.includes('INSUFFICIENT_BALANCE')) {
         return res.status(400).json({ 
           success: false, 
           error: 'Insufficient balance.', 
@@ -218,20 +311,39 @@ app.post('/trade/place',
 
 // ── Trade Settlement Endpoint ─────────────────────────────
 
+// Client-initiated settle. The engine settles every contract at its expiry
+// tick on its own; this endpoint exists so the client can fetch the result
+// (and as a fallback if a push was missed). It can only settle a contract
+// that has EXPIRED - it is not an early-exit/cashout, which would need its
+// own discounted payout instead of the stored potential_payout.
 app.post('/trade/settle/:contractId',
+  tradeTiming(),
   mw.authenticate,
   async (req, res, next) => {
     try {
       const { contractId } = req.params
-      const { exitPrice } = req.body
+      mark(req, 'auth')
 
-      const contract = await db.getContractById(contractId)
-      if (!contract) {
-        return res.status(404).json({
-          success: false,
-          error: 'Contract not found.',
-          code: 'NOT_FOUND'
-        })
+      // The engine's in-memory index knows every open contract, and
+      // contracts it settled in the last few minutes, so the common case
+      // needs no database read before the settle call.
+      let contract
+      let isOpen
+      const known = market.lookupContract(contractId)
+      if (known) {
+        contract = known.contract
+        isOpen = known.open
+      } else {
+        contract = await db.getContractById(contractId)
+        mark(req, 'lookup')
+        if (!contract) {
+          return res.status(404).json({
+            success: false,
+            error: 'Contract not found.',
+            code: 'NOT_FOUND'
+          })
+        }
+        isOpen = contract.status === 'open'
       }
 
       if (contract.user_id !== req.user.id) {
@@ -242,86 +354,69 @@ app.post('/trade/settle/:contractId',
         })
       }
 
-      const account = await db.getAccountById(contract.account_id)
-      if (!account) {
+      const tick = market.getLatestTick(contract.symbol)
+      if (!tick) {
+        return res.status(503).json({
+          success: false,
+          error: 'Market not ready.',
+          code: 'MARKET_UNAVAILABLE'
+        })
+      }
+
+      // An open contract cannot be settled before its expiry tick. Without
+      // this check a caller could settle the moment the price moved in their
+      // favour and collect the full payout.
+      const expiryTick = parseInt(contract.entry_tick) + parseInt(contract.duration_ticks)
+      if (isOpen && tick.tick < expiryTick) {
+        return res.status(409).json({
+          success: false,
+          error: 'Contract has not expired yet.',
+          code: 'NOT_EXPIRED',
+          data: { ticksRemaining: expiryTick - tick.tick }
+        })
+      }
+
+      // The exit price comes from the engine, never from the request body,
+      // and is the price of the EXPIRY tick (what the engine would have used)
+      // rather than whatever the latest tick is when this call arrives.
+      const exitPrice = market.getTickPrice(contract.symbol, expiryTick) ?? tick.price
+      const outcome = market.resolveOutcome(contract, exitPrice)
+
+      // settle_contracts claims the contract atomically, so if the
+      // engine's tick loop got there first this returns the settled
+      // state with alreadySettled = true instead of paying out twice.
+      const results = await db.settleContracts([
+        {
+          contract_id: contract.id,
+          exit_price: exitPrice,
+          outcome,
+          settled_at: new Date().toISOString(),
+        },
+      ])
+      mark(req, 'rpc')
+
+      const result = results[0]
+      if (!result) {
         return res.status(404).json({
           success: false,
-          error: 'Account not found.',
+          error: 'Contract not found.',
           code: 'NOT_FOUND'
         })
       }
 
-      if (contract.status !== 'open') {
-        const existingPayout = contract.outcome === 'win' ? parseFloat(contract.potential_payout) : 0
-        const existingPnl = existingPayout - parseFloat(contract.stake)
-        return res.json({
-          success: true,
-          data: {
-            contractId: contract.id,
-            outcome: contract.outcome,
-            pnl: existingPnl,
-            newBalance: parseFloat(account.balance),
-            accountType: account.type,
-            alreadySettled: true,
-          },
-        })
+      market.markSettled(result.contract_id)
+
+      const data = {
+        contractId: result.contract_id,
+        outcome: result.outcome,
+        exitPrice: result.exit_price !== undefined && result.exit_price !== null ? parseFloat(result.exit_price) : exitPrice,
+        pnl: parseFloat(result.pl),
+        newBalance: parseFloat(result.new_balance),
+        accountType: result.account_type,
       }
+      if (result.already_settled) data.alreadySettled = true
 
-      const outcome = market.resolveOutcome(contract, exitPrice)
-      const payout = outcome === 'win' ? parseFloat(contract.potential_payout) : 0
-      const pnl = payout - parseFloat(contract.stake)
-
-      const claimed = await db.settleContract(contract.id, {
-        exitPrice,
-        outcome,
-        settledAt: new Date().toISOString(),
-      })
-
-      if (!claimed) {
-        const settled = await db.getContractById(contract.id)
-        const updatedAccount = await db.getAccountById(contract.account_id)
-        const settledPayout = settled.outcome === 'win' ? parseFloat(settled.potential_payout) : 0
-        return res.json({
-          success: true,
-          data: {
-            contractId: settled.id,
-            outcome: settled.outcome,
-            pnl: settledPayout - parseFloat(settled.stake),
-            newBalance: parseFloat(updatedAccount.balance),
-            accountType: updatedAccount.type,
-            alreadySettled: true,
-          },
-        })
-      }
-
-      if (outcome === 'win') {
-        await db.addBalance(account.id, payout)
-        console.log(`[Settle] User ${req.user.id} won ${payout} on contract ${contractId}`)
-      } else {
-        console.log(`[Settle] User ${req.user.id} lost on contract ${contractId}`)
-      }
-
-      await db.updatePL(account.id, pnl)
-
-      await db.createTransaction({
-        user_id: req.user.id,
-        type: outcome === 'win' ? 'trade_win' : 'trade_loss',
-        amount_usd: outcome === 'win' ? payout : parseFloat(contract.stake),
-        status: 'completed',
-      })
-
-      const updatedAccount = await db.getAccountById(account.id)
-
-      res.json({
-        success: true,
-        data: {
-          contractId: contract.id,
-          outcome,
-          pnl,
-          newBalance: parseFloat(updatedAccount.balance),
-          accountType: updatedAccount.type,
-        },
-      })
+      res.json({ success: true, data })
     } catch (err) {
       console.error('[Settle] Error:', err)
       next(err)
@@ -336,8 +431,11 @@ app.get('/positions/open',
   async (req, res, next) => {
     try {
       const { accountType = 'real' } = req.query
-      const account = await db.getAccountByUserAndType(req.user.id, accountType)
-      const positions = await db.getOpenContractsByAccount(account.id)
+      const accountId = await db.getAccountIdByUserAndType(req.user.id, accountType)
+      if (!accountId) {
+        return res.status(404).json({ success: false, error: 'Account not found.', code: 'NOT_FOUND' })
+      }
+      const positions = await db.getOpenContractsByAccount(accountId)
       res.json({ success: true, data: { positions } })
     } catch (err) { next(err) }
   }
@@ -348,8 +446,11 @@ app.get('/positions/history',
   async (req, res, next) => {
     try {
       const { page = 1, limit = 20, accountType = 'real' } = req.query
-      const account = await db.getAccountByUserAndType(req.user.id, accountType)
-      const positions = await db.getContractsByAccount(account.id, {
+      const accountId = await db.getAccountIdByUserAndType(req.user.id, accountType)
+      if (!accountId) {
+        return res.status(404).json({ success: false, error: 'Account not found.', code: 'NOT_FOUND' })
+      }
+      const positions = await db.getContractsByAccount(accountId, {
         limit: parseInt(limit),
         offset: (parseInt(page) - 1) * parseInt(limit),
       })
@@ -415,6 +516,9 @@ app.post('/wallet/deposit/mpesa',
 )
 
 app.post('/wallet/mpesa/callback', wallet.mpesaCallback)
+
+// PalPluss webhook + admin provider switch (GET/PUT /admin/payments/provider)
+payments.registerRoutes(app, { mw })
 
 app.post('/wallet/withdraw/mpesa', 
   mw.authenticate, 
@@ -533,13 +637,21 @@ app.get('/admin/transactions',
   mw.authenticate,
   mw.requireRole('admin'),
   admin.getAllTransactions
-)
+  )
+  
+  app.get('/admin/stats',
+    mw.authenticate,
+    mw.requireRole('admin'),
+    admin.getStats
+  )
+  app.get('/admin/stats/daily',
+    mw.authenticate,
+    mw.requireRole('admin'),
+    admin.getDailyStats
+  )
 
-app.get('/admin/stats',
-  mw.authenticate,
-  mw.requireRole('admin'),
-  admin.getStats
-)
+// ── Debug-only: house edge controls (inactive unless DEBUG_MODE=true) ──
+houseEdge.registerRoutes(app, { mw, market })
 
 app.get('/admin/influencer-withdrawals',
   mw.authenticate,
@@ -586,6 +698,12 @@ app.post('/influencer/withdraw',
   influencer.requestWithdrawal
 )
 
+app.post('/influencer/reset-international-transfers',
+  mw.authenticate,
+  mw.requireRole('influencer'),
+  influencer.resetInternationalTransfers
+)
+
 // ── Global error handler ───────────────────────────────────────────
 
 app.use((err, req, res, next) => {
@@ -613,8 +731,12 @@ wss.on('connection', (ws, req) => {
 async function start() {
   console.log('[G Wave] Starting engine...')
   
+  // Redis is optional. If it isn't reachable the app still boots and
+  // everything still works - just without the cache.
+  await redis.connectRedis()
+  
   exchange.startExchangeRateUpdater()
-  market.startEngine()
+  await market.startEngine()
   console.log('[G Wave] Market engine started')
 
   const port = process.env.PORT || 4000
@@ -622,6 +744,7 @@ async function start() {
     console.log(`[G Wave] API: http://localhost:${port}`)
     console.log(`[G Wave] WS: ws://localhost:${port}/ws`)
     console.log(`[G Wave] Environment: ${process.env.NODE_ENV || 'development'}`)
+    console.log(`[G Wave] Redis: ${redis.isReady() ? 'connected' : 'unavailable (running without cache)'}`)
   })
 }
 

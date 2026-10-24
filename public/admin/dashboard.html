@@ -413,12 +413,22 @@
             <div class="actions">
                 <button class="btn btn-outline btn-sm" onclick="refreshAll()">↻ Refresh</button>
                 <button class="btn btn-outline btn-sm" onclick="refreshRate()">⟳ Refresh Rate</button>
+                <button class="btn btn-outline btn-sm" id="debugLink" style="display:none" onclick="openHouseEdge()">🛠 House Edge (debug)</button>
                 <button class="btn btn-outline btn-sm" onclick="handleLogout()">🚪 Logout</button>
                 <button class="btn btn-outline btn-sm" onclick="window.location.href='/'">← Back to App</button>
             </div>
         </header>
 
         <!-- Stats -->
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:12px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+                <span style="color:#aaa;font-size:14px;">Overview</span>
+                <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#bbb;cursor:pointer;">
+                    <input type="checkbox" id="dailyStatsToggle" onchange="toggleDailyStats()" style="accent-color:#37D948;">
+                    <span>Daily stats</span>
+                </label>
+            </div>
+        </div>
         <div class="stats-grid" id="statsGrid">
             <div class="stat-card"><div class="label">Total Users</div><div class="value white" id="statUsers">—</div></div>
             <div class="stat-card"><div class="label">Total Deposits</div><div class="value green" id="statDeposits">—</div></div>
@@ -429,6 +439,10 @@
             </div>
             <div class="stat-card"><div class="label">Pending Withdrawals</div><div class="value yellow" id="statPending">—</div></div>
         </div>
+        <div class="stats-grid" id="dailyStatsGrid" style="display:none;margin-top:12px;">
+            <div class="stat-card"><div class="label">New users (today)</div><div class="value white" id="statNewUsers">—</div></div>
+            <div class="stat-card"><div class="label">Amount deposited (today)</div><div class="value green" id="statAmountDepositedToday">—</div></div>
+        </div>
 
         <!-- Tabs -->
         <div class="tabs" id="tabs">
@@ -437,6 +451,7 @@
             <button class="tab" data-tab="transactions">Transactions <span class="badge warning" id="wdBadge">0</span></button>
             <button class="tab" data-tab="users">Users</button>
             <button class="tab" data-tab="exchange">Exchange Rate</button>
+            <button class="tab" data-tab="payments">Payments</button>
         </div>
 
         <!-- ── PANEL: Dashboard ── -->
@@ -497,6 +512,11 @@
         <!-- ── PANEL: Exchange Rate ── -->
         <div class="panel" id="panel-exchange">
             <div id="exchangeContent"><div class="loader"><div class="spinner"></div></div></div>
+        </div>
+
+        <!-- ── PANEL: Payments (deposit provider) ── -->
+        <div class="panel" id="panel-payments">
+            <div id="paymentsContent"><div class="loader"><div class="spinner"></div></div></div>
         </div>
 
     </div>
@@ -602,6 +622,28 @@
             }
         }
 
+        // ── Debug tools link ──
+        // Only shown when the server runs in DEBUG_MODE. The page itself can't
+        // be opened by URL: clicking the link asks the server for a single-use
+        // ticket and navigates there with it.
+        async function setupDebugLink() {
+            try {
+                const r = await apiFetch('/admin/debug/status');
+                if (r.data && r.data.debugMode) {
+                    document.getElementById('debugLink').style.display = '';
+                }
+            } catch (_) { /* not available: leave the link hidden */ }
+        }
+
+        async function openHouseEdge() {
+            try {
+                const r = await apiFetch('/admin/debug/page-ticket', { method: 'POST', body: '{}' });
+                window.location.href = r.data.url;
+            } catch (e) {
+                toast(e.message, 'error');
+            }
+        }
+
         // ── Gross Balance (Real Balance + Pending Withdrawals) ──
         // Pending withdrawal amounts are still sitting in our account until
         // they're approved/paid out, so this card adds them back on top of
@@ -623,29 +665,56 @@
                     loadTransactions(txPage),
                     loadUsers(),
                     loadExchange(),
+                    loadPayments(),
                 ]);
             } catch (e) {
                 console.error('[Admin] Load error:', e);
             }
         }
 
+        async function loadDailyStats() {
+            try {
+                const data = await apiFetch('/admin/stats/daily');
+                if (data.success && data.data) {
+                    document.getElementById('statNewUsers').textContent = data.data.newUsers || 0;
+                    document.getElementById('statAmountDepositedToday').textContent = '$' + (data.data.amountDeposited || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                }
+            } catch (e) {
+                console.error('[DailyStats] Error:', e);
+            }
+        }
+
         async function loadStats() {
             try {
                 const data = await apiFetch('/admin/stats');
-                if (data.success) {
-                    const s = data.data;
-                    document.getElementById('statUsers').textContent = s.totalUsers || 0;
-                    document.getElementById('statDeposits').textContent = '$' + (s.totalDeposited || 0).toLocaleString();
-                    document.getElementById('statBalance').textContent = '$' + (s.totalBalanceReal || 0).toLocaleString();
-                    statCache.totalBalanceReal = s.totalBalanceReal || 0;
-                    updateGrossBalanceCard();
-                    document.getElementById('statDemo').textContent = '$' + (s.totalBalanceDemo || 0).toLocaleString();
-                    document.getElementById('statWithdrawn').textContent = '$' + (s.totalWithdrawn || 0).toLocaleString();
-                    document.getElementById('statInfluencer').textContent = '$' + (s.totalInfluencerWithdrawn || 0)
-                        .toLocaleString();
-                }
+                if (!data.success || !data.data) return;
+                const s = data.data;
+                const money = n => '$' + (n || 0).toLocaleString(undefined, {
+                    minimumFractionDigits: 2, maximumFractionDigits: 2
+                });
+                document.getElementById('statUsers').textContent = s.totalUsers || 0;
+                document.getElementById('statDeposits').textContent = money(s.totalDeposited);
+                document.getElementById('statBalance').textContent = money(s.totalBalanceReal);
+                document.getElementById('statDemo').textContent = money(s.totalBalanceDemo);
+                document.getElementById('statWithdrawn').textContent = money(s.totalWithdrawn);
+                document.getElementById('statInfluencer').textContent = money(s.totalInfluencerWithdrawn);
+                statCache.totalBalanceReal = s.totalBalanceReal || 0;
+                updateGrossBalanceCard();
             } catch (e) {
                 console.error('[Stats] Error:', e);
+            }
+        }
+
+        function toggleDailyStats() {
+            const toggle = document.getElementById('dailyStatsToggle');
+            const grid = document.getElementById('dailyStatsGrid');
+            if (toggle && grid) {
+                if (toggle.checked) {
+                    grid.style.display = 'grid';
+                    loadDailyStats();
+                } else {
+                    grid.style.display = 'none';
+                }
             }
         }
 
@@ -668,7 +737,7 @@
                 // the "Pending Withdrawals" stat card and is owned by
                 // loadTransactions()'s withdrawal-pending fetch below. KYC
                 // submissions default to 'pending' for every signup until
-                // they submit documents (see trigger.sql), so this count is
+                // they submit documents (see database.sql), so this count is
                 // "unverified users", not "pending withdrawals" — writing
                 // it here was clobbering the real withdrawal count whenever
                 // KYC loaded after transactions.
@@ -1014,6 +1083,73 @@
             }
         }
 
+        // ── Payments: deposit provider ──
+        const PROVIDER_LABELS = { palpluss: 'PalPluss', daraja: 'Daraja (Safaricom)' };
+
+        async function loadPayments() {
+            const container = document.getElementById('paymentsContent');
+            try {
+                const data = await apiFetch('/admin/payments/provider');
+                if (!data.success) throw new Error(data.error || 'Failed to load');
+                const { preferred, active, providers } = data.data;
+
+                const row = (key) => {
+                    const p = providers[key];
+                    const isActive = active && active.provider === key;
+                    const isPreferred = preferred === key;
+                    const badge = p.configured
+                        ? '<span class="badge-status completed">Configured</span>'
+                        : '<span class="badge-status failed">Missing env vars</span>';
+                    const missing = p.configured ? '' :
+                        `<div style="font-size:12px;color:#ff7b7b;margin-top:6px;">Missing: ${p.missing.map(escapeHtml).join(', ')}</div>`;
+                    const action = isPreferred
+                        ? '<span style="font-size:13px;color:#00c853;">✓ Selected</span>'
+                        : `<button class="btn btn-primary btn-sm" ${p.configured ? '' : 'disabled'} onclick="setPaymentProvider('${key}')">Use ${escapeHtml(PROVIDER_LABELS[key])}</button>`;
+                    return `
+                        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:14px 0;border-top:1px solid #2a2a2a;">
+                            <div>
+                                <div style="font-weight:600;">${escapeHtml(PROVIDER_LABELS[key])} ${badge}
+                                    ${isActive ? '<span style="color:#00c853;font-size:12px;margin-left:6px;">● handling deposits now</span>' : ''}</div>
+                                ${missing}
+                            </div>
+                            ${action}
+                        </div>`;
+                };
+
+                const activeText = active
+                    ? `${escapeHtml(PROVIDER_LABELS[active.provider])}${active.reason !== 'preferred' ? ` <span style="color:#ffc400;font-size:13px;">(${escapeHtml(active.reason)})</span>` : ''}`
+                    : '<span style="color:#ff7b7b;">None: deposits are unavailable</span>';
+
+                container.innerHTML = `
+                    <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;padding:20px;">
+                        <div style="font-size:14px;color:#888;">M-Pesa deposit provider</div>
+                        <div style="font-size:28px;font-weight:700;color:#00c853;margin:4px 0 6px;">${activeText}</div>
+                        <div style="font-size:12px;color:#666;margin-bottom:12px;">
+                            PalPluss is the default. If a provider's env vars are missing the other one is used automatically.
+                            Switching only affects new deposits; pending ones finish on the provider they started with.
+                        </div>
+                        ${row('palpluss')}
+                        ${row('daraja')}
+                    </div>`;
+            } catch (e) {
+                container.innerHTML = `<div style="color:#ff7b7b;">Couldn't load payment settings: ${escapeHtml(e.message)}</div>`;
+            }
+        }
+
+        async function setPaymentProvider(provider) {
+            if (!confirm(`Switch new deposits to ${PROVIDER_LABELS[provider]}?`)) return;
+            try {
+                await apiFetch('/admin/payments/provider', {
+                    method: 'PUT',
+                    body: JSON.stringify({ provider }),
+                });
+                toast(`Deposits now use ${PROVIDER_LABELS[provider]}`, 'success');
+                loadPayments();
+            } catch (e) {
+                toast(e.message || 'Failed to switch provider', 'error');
+            }
+        }
+
         async function refreshRate() {
             try {
                 const data = await apiFetch('/admin/exchange/refresh', { method: 'POST' });
@@ -1074,6 +1210,7 @@
             try {
                 const authenticated = await checkAuth();
                 if (authenticated) {
+                    setupDebugLink();
                     await loadAll();
                     // Auto-refresh every 30 seconds
                     setInterval(loadAll, 30000);

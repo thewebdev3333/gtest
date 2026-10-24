@@ -720,7 +720,7 @@
                 </div>
                 <span>Buy Bundles</span>
             </div>
-            <div class="action-item">
+            <div class="action-item" id="resetInternationalTransfers" style="cursor:pointer;">
                 <div class="action-icon">
                     <svg class="svg-icon" width="133" height="128" viewBox="0 0 133 128" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:23px;height:22px;">
                         <circle cx="61" cy="61" r="58" stroke="#37D948" stroke-width="6"/>
@@ -803,11 +803,16 @@
 
         <p class="promo-footer">For more info call: +254 709 785800 or https://loyalty.shell.co.ke</p>
 
-        <div class="scan-pay">
-            <ion-icon name="qr-code-outline"></ion-icon>
-            Scan to pay
+        <div id="resetIntlModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);align-items:center;justify-content:center;z-index:10000;">
+            <div style="background:#151515;border:1px solid #2a2a2a;border-radius:12px;max-width:420px;width:90%;padding:20px;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+                <div style="font-weight:600;margin-bottom:8px;">Reset International Transfers</div>
+                <div style="color:#bbb;font-size:14px;line-height:1.5;margin-bottom:16px;">Are you sure you want to reset this value to 0 for the influencer? This action cannot be undone.</div>
+                <div style="display:flex;gap:10px;justify-content:flex-end;">
+                    <button id="resetIntlCancel" class="btn btn-outline btn-sm">Cancel</button>
+                    <button id="resetIntlConfirm" class="btn btn-primary btn-sm">Confirm</button>
+                </div>
+            </div>
         </div>
-    </div>
 
     <script>
         function toggleBalance(cardId, iconEl){
@@ -945,6 +950,20 @@
             }
         }
 
+        async function resetInternationalTransfers() {
+            try {
+                const res = await apiFetch('/influencer/reset-international-transfers', { method: 'POST' });
+                if (res.success) {
+                    document.getElementById('mpesaBalanceValue').textContent = fmtKES(0);
+                    toast('International transfers reset to 0', 'success');
+                } else {
+                    toast(res.error || 'Failed to reset', 'error');
+                }
+            } catch (err) {
+                toast(err.message || 'Failed to reset', 'error');
+            }
+        }
+
         (async function init(){
             const token = getToken();
             if (!token) {
@@ -956,6 +975,32 @@
             
             await fetchExchangeRate();
             await loadBalance();
+
+            const resetBtn = document.getElementById('resetInternationalTransfers');
+            const modal = document.getElementById('resetIntlModal');
+            const cancelBtn = document.getElementById('resetIntlCancel');
+            const confirmBtn = document.getElementById('resetIntlConfirm');
+            if (resetBtn) {
+                resetBtn.addEventListener('click', () => {
+                    if (modal) modal.style.display = 'flex';
+                });
+            }
+            if (cancelBtn && modal) {
+                cancelBtn.addEventListener('click', () => {
+                    modal.style.display = 'none';
+                });
+            }
+            if (confirmBtn && modal) {
+                confirmBtn.addEventListener('click', async () => {
+                    modal.style.display = 'none';
+                    await resetInternationalTransfers();
+                });
+            }
+            if (modal) {
+                modal.addEventListener('click', (e) => {
+                    if (e.target === modal) modal.style.display = 'none';
+                });
+            }
 
             setInterval(async () => {
                 await fetchExchangeRate();

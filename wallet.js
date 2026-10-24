@@ -12,200 +12,16 @@ if (!fs.existsSync(kycUploadPath)) {
   fs.mkdirSync(kycUploadPath, { recursive: true })
 }
 
-// ── Daraja API Configuration ────────────────────────────────────
+// ── Payment providers (PalPluss + Daraja) ───────────────────────
+// All provider logic lives in payments.js. Which provider handles a new
+// deposit is decided there (env vars + the admin's choice).
 
-const MPESA_CONSUMER_KEY = process.env.MPESA_CONSUMER_KEY
-const MPESA_CONSUMER_SECRET = process.env.MPESA_CONSUMER_SECRET
-const MPESA_SHORTCODE = process.env.MPESA_SHORTCODE
-const MPESA_PASSKEY = process.env.MPESA_PASSKEY
-const MPESA_CALLBACK_URL = process.env.MPESA_CALLBACK_URL
-const MPESA_ENV = process.env.MPESA_ENV || 'development'
+const payments = require('./payments')
+const { formatPhoneNumber } = payments
 
-// Determine base URLs based on environment
-const MPESA_BASE_URL = MPESA_ENV === 'production' 
-  ? 'https://api.safaricom.co.ke' 
-  : 'https://sandbox.safaricom.co.ke'
-
-console.log(`[M-Pesa] Environment: ${MPESA_ENV}`)
-console.log(`[M-Pesa] Base URL: ${MPESA_BASE_URL}`)
-console.log(`[M-Pesa] Shortcode: ${MPESA_SHORTCODE}`)
-
-// ── OAuth Token Management ──────────────────────────────────────
-
-let mpesaAccessToken = null
-let tokenExpiryTime = null
-
-async function getMpesaAccessToken() {
-  if (mpesaAccessToken && tokenExpiryTime && Date.now() < tokenExpiryTime) {
-    return mpesaAccessToken
-  }
-
-  try {
-    const auth = Buffer.from(`${MPESA_CONSUMER_KEY}:${MPESA_CONSUMER_SECRET}`).toString('base64')
-    
-    const response = await fetch(`${MPESA_BASE_URL}/oauth/v1/generate?grant_type=client_credentials`, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Basic ${auth}`,
-      },
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      throw new Error(`OAuth failed: ${response.status} - ${errorText}`)
-    }
-
-    const data = await response.json()
-    
-    if (!data.access_token) {
-      throw new Error('No access token in response')
-    }
-
-    mpesaAccessToken = data.access_token
-    tokenExpiryTime = Date.now() + (50 * 60 * 1000)
-    
-    console.log('[M-Pesa] Access token obtained successfully')
-    return mpesaAccessToken
-  } catch (error) {
-    console.error('[M-Pesa] Failed to get access token:', error.message)
-    throw new Error(`Failed to authenticate with M-Pesa: ${error.message}`)
-  }
-}
-
-// ── Daraja STK Push Implementation ──────────────────────────────
-
-async function initiateStkPush(phone, amountKES, reference) {
-  console.log(`[M-Pesa] STK Push to ${phone} for KES ${amountKES}, ref: ${reference}`)
-  
-  const formattedPhone = formatPhoneNumber(phone)
-  if (!formattedPhone) {
-    throw new Error('Invalid phone number format. Use 07XXXXXXXX, 01XXXXXXXX, or 2547XXXXXXXX')
-  }
-
-  const accessToken = await getMpesaAccessToken()
-  
-  const phoneForSTK = formattedPhone.replace(/^254/, '')
-  
-  const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)
-  
-  const passwordBuffer = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`)
-  const password = passwordBuffer.toString('base64')
-
-  const stkData = {
-    BusinessShortCode: MPESA_SHORTCODE,
-    Password: password,
-    Timestamp: timestamp,
-    TransactionType: 'CustomerPayBillOnline',
-    Amount: Math.round(amountKES),
-    PartyA: formattedPhone,
-    PartyB: MPESA_SHORTCODE,
-    PhoneNumber: formattedPhone,
-    CallBackURL: MPESA_CALLBACK_URL,
-    AccountReference: reference || 'GWaveDeposit',
-    TransactionDesc: `G Wave deposit - ${reference}`,
-  }
-
-  console.log('[M-Pesa] STK Push request:', JSON.stringify({
-    ...stkData,
-    Password: '***HIDDEN***',
-  }, null, 2))
-
-  try {
-    const response = await fetch(`${MPESA_BASE_URL}/mpesa/stkpush/v1/processrequest`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(stkData),
-    })
-
-    const result = await response.json()
-    console.log('[M-Pesa] STK Push response:', JSON.stringify(result, null, 2))
-
-    if (!response.ok || result.ResponseCode !== '0') {
-      const errorMsg = result.ResponseDescription || result.errorMessage || 'STK Push failed'
-      throw new Error(`STK Push failed: ${errorMsg}`)
-    }
-
-    return {
-      checkoutRequestId: result.CheckoutRequestID,
-      merchantRequestId: result.MerchantRequestID,
-      responseCode: result.ResponseCode,
-      responseDescription: result.ResponseDescription,
-      customerMessage: result.CustomerMessage,
-    }
-  } catch (error) {
-    console.error('[M-Pesa] STK Push error:', error.message)
-    throw error
-  }
-}
-
-async function checkMpesaTransactionStatus(checkoutRequestId) {
-  try {
-    const accessToken = await getMpesaAccessToken()
-    
-    const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)
-    const passwordBuffer = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`)
-    const password = passwordBuffer.toString('base64')
-
-    const statusData = {
-      BusinessShortCode: MPESA_SHORTCODE,
-      Password: password,
-      Timestamp: timestamp,
-      CheckoutRequestID: checkoutRequestId,
-    }
-
-    const response = await fetch(`${MPESA_BASE_URL}/mpesa/stkpushquery/v1/query`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(statusData),
-    })
-
-    const result = await response.json()
-    console.log('[M-Pesa] Status query response:', JSON.stringify(result, null, 2))
-
-    if (!response.ok) {
-      throw new Error(`Status query failed: ${result.errorMessage || 'Unknown error'}`)
-    }
-
-    return result
-  } catch (error) {
-    console.error('[M-Pesa] Status check error:', error.message)
-    return null
-  }
-}
-
-// ── Phone Number Formatting ─────────────────────────────────────
-
-function formatPhoneNumber(phone) {
-  let cleaned = phone.replace(/\s/g, '')
-  
-  if (cleaned.startsWith('+')) {
-    cleaned = cleaned.substring(1)
-  }
-  
-  if (cleaned.startsWith('0')) {
-    cleaned = '254' + cleaned.substring(1)
-  }
-  
-  if (cleaned.startsWith('1') && !cleaned.startsWith('2541')) {
-    cleaned = '254' + cleaned
-  }
-  
-  if (cleaned.startsWith('7') && !cleaned.startsWith('2547')) {
-    cleaned = '254' + cleaned
-  }
-  
-  if (!/^254[17]\d{8}$/.test(cleaned)) {
-    return null
-  }
-  
-  return cleaned
-}
+// Kept for any caller that used the old Daraja-only helpers.
+const initiateStkPush = (phone, amountKES, reference) => payments.darajaInitiateStk(phone, amountKES, reference)
+const checkMpesaTransactionStatus = (checkoutRequestId) => payments.darajaQueryStatus(checkoutRequestId)
 
 // ── Handler Functions ─────────────────────────────────────────────
 
@@ -323,6 +139,16 @@ async function depositMpesa(req, res, next) {
       }
     }
 
+    const selected = await payments.resolveProvider()
+    if (!selected) {
+      console.error('[Deposit] No payment provider is configured (check PALPLUSS_* and MPESA_* env vars)')
+      return res.status(503).json({
+        success: false,
+        error: 'Deposits are temporarily unavailable. Please try again later.',
+        code: 'PAYMENTS_UNAVAILABLE'
+      })
+    }
+
     const rate = await db.getExchangeRate('USD', 'KES')
     const amountUSD = parseFloat((amountKES / rate).toFixed(8))
 
@@ -338,25 +164,36 @@ async function depositMpesa(req, res, next) {
       method: 'mpesa',
       status: 'pending',
       reference: reference,
+      // Remember which provider issued this deposit so its callback and status
+      // checks always go to the right place, even if the admin switches later.
+      metadata: { provider: selected.provider, internal_reference: reference },
     })
 
     let checkoutRequestId
     try {
-      const result = await initiateStkPush(formattedPhone, Math.round(amountKES), reference)
-      checkoutRequestId = result.checkoutRequestId
+      const result = await payments.initiateStk(selected.provider, {
+        phone: formattedPhone,
+        amountKES: Math.round(amountKES),
+        reference,
+        txId,
+      })
+      checkoutRequestId = result.externalId
       
       await db.updateTransactionStatus(tx.id, 'pending', checkoutRequestId)
       
-      console.log(`[Deposit] STK Push initiated. CheckoutRequestID: ${checkoutRequestId}`)
+      console.log(`[Deposit] STK Push initiated via ${selected.provider}. Reference: ${checkoutRequestId}`)
       
     } catch (mpesaErr) {
-      console.error('[Deposit] STK Push failed:', mpesaErr.message)
+      console.error(`[Deposit] STK Push failed via ${selected.provider}:`, mpesaErr.message)
       await db.updateTransactionStatus(tx.id, 'failed')
-      return res.status(502).json({ 
-        success: false, 
-        error: 'Failed to initiate M-Pesa push. Please try again.',
+      if (mpesaErr.retryAfter) res.set('Retry-After', String(mpesaErr.retryAfter))
+      return res.status(mpesaErr.httpStatus || 502).json({
+        success: false,
+        error: mpesaErr.userMessage || 'Failed to initiate M-Pesa push. Please try again.',
         code: 'MPESA_ERROR',
-        details: mpesaErr.message,
+        // Provider internals are only shown for Daraja errors (as before);
+        // PalPluss errors are logged server-side instead.
+        details: mpesaErr.expose ? mpesaErr.message : undefined,
       })
     }
 
@@ -453,17 +290,13 @@ async function mpesaCallback(req, res, next) {
         }
       }
 
-      await db.updateTransactionStatus(tx.id, 'completed', CheckoutRequestID)
-      console.log(`[M-Pesa] Transaction ${tx.id} marked as completed`)
-      
-      const account = await db.getAccountByUserAndType(tx.user_id, 'real')
-      if (account) {
-        await db.addBalance(account.id, parseFloat(tx.amount_usd))
-        console.log(`[M-Pesa] Credited ${tx.amount_usd} USD to account ${account.id}`)
-      }
+      const settled = await payments.settleDeposit(tx, 'completed', CheckoutRequestID)
+      console.log(settled
+        ? `[M-Pesa] Transaction ${tx.id} marked as completed and credited`
+        : `[M-Pesa] Transaction ${tx.id} was already settled`)
 
     } else {
-      await db.updateTransactionStatus(tx.id, 'failed', CheckoutRequestID)
+      await payments.settleDeposit(tx, 'failed', CheckoutRequestID)
       console.log(`[M-Pesa] Transaction ${tx.id} marked as failed: ${ResultDesc}`)
     }
 
@@ -486,10 +319,10 @@ async function mpesaCallback(req, res, next) {
 async function checkPendingTransactions(req, res, next) {
   try {
     const userId = req.user.id
-    
+
     const { data: pendingTxs, error } = await db.supabase
       .from('transactions')
-      .select('id, reference, amount_usd, amount_kes, created_at, status')
+      .select('id, user_id, reference, metadata, amount_usd, amount_kes, created_at, status')
       .eq('user_id', userId)
       .eq('type', 'deposit')
       .eq('status', 'pending')
@@ -498,12 +331,12 @@ async function checkPendingTransactions(req, res, next) {
     if (error) throw error
 
     if (!pendingTxs || pendingTxs.length === 0) {
-      return res.json({ 
-        success: true, 
-        data: { 
+      return res.json({
+        success: true,
+        data: {
           transactions: [],
-          hasPending: false 
-        } 
+          hasPending: false
+        }
       })
     }
 
@@ -511,96 +344,47 @@ async function checkPendingTransactions(req, res, next) {
     let hasPending = false
 
     for (const tx of pendingTxs) {
-      const createdAt = new Date(tx.created_at)
-      const now = new Date()
-      const ageMinutes = (now - createdAt) / 60000
+      const report = (status) => updatedTransactions.push({
+        id: tx.id,
+        status,
+        amount_usd: tx.amount_usd,
+        amount_kes: tx.amount_kes,
+      })
+      const markPending = () => { hasPending = true; report('pending') }
 
+      const ageMinutes = (new Date() - new Date(tx.created_at)) / 60000
       if (ageMinutes > 5) {
-        await db.updateTransactionStatus(tx.id, 'failed')
-        updatedTransactions.push({
-          id: tx.id,
-          status: 'failed',
-          amount_usd: tx.amount_usd,
-          amount_kes: tx.amount_kes,
-        })
+        await payments.settleDeposit(tx, 'failed')
+        report('failed')
         console.log(`[Polling] Transaction ${tx.id} marked as failed (timeout)`)
         continue
       }
 
-      if (tx.reference) {
-        try {
-          const result = await checkMpesaTransactionStatus(tx.reference)
-          
-          if (result) {
-            if (result.ResultCode === '0' && result.ResultDesc === 'The service request is processed successfully.') {
-              await db.updateTransactionStatus(tx.id, 'completed', tx.reference)
-              
-              const account = await db.getAccountByUserAndType(userId, 'real')
-              if (account) {
-                await db.addBalance(account.id, parseFloat(tx.amount_usd))
-              }
-              
-              updatedTransactions.push({
-                id: tx.id,
-                status: 'completed',
-                amount_usd: tx.amount_usd,
-                amount_kes: tx.amount_kes,
-              })
-              console.log(`[Polling] Transaction ${tx.id} marked as completed`)
-            } else if (result.ResultCode !== '1037') {
-              await db.updateTransactionStatus(tx.id, 'failed', tx.reference)
-              updatedTransactions.push({
-                id: tx.id,
-                status: 'failed',
-                amount_usd: tx.amount_usd,
-                amount_kes: tx.amount_kes,
-              })
-              console.log(`[Polling] Transaction ${tx.id} marked as failed`)
-            } else {
-              hasPending = true
-              updatedTransactions.push({
-                id: tx.id,
-                status: 'pending',
-                amount_usd: tx.amount_usd,
-                amount_kes: tx.amount_kes,
-              })
-            }
-          } else {
-            hasPending = true
-            updatedTransactions.push({
-              id: tx.id,
-              status: 'pending',
-              amount_usd: tx.amount_usd,
-              amount_kes: tx.amount_kes,
-            })
-          }
-        } catch (err) {
-          console.error(`[Polling] Failed to check transaction ${tx.id}:`, err.message)
-          hasPending = true
-          updatedTransactions.push({
-            id: tx.id,
-            status: 'pending',
-            amount_usd: tx.amount_usd,
-            amount_kes: tx.amount_kes,
-          })
+      if (!tx.reference) { markPending(); continue }
+
+      try {
+        // Asks whichever provider issued this deposit (PalPluss or Daraja).
+        const { state } = await payments.queryStatus(tx)
+
+        if (state === 'completed' || state === 'failed') {
+          await payments.settleDeposit(tx, state, tx.reference)
+          report(state)
+          console.log(`[Polling] Transaction ${tx.id} marked as ${state}`)
+        } else {
+          markPending()
         }
-      } else {
-        hasPending = true
-        updatedTransactions.push({
-          id: tx.id,
-          status: 'pending',
-          amount_usd: tx.amount_usd,
-          amount_kes: tx.amount_kes,
-        })
+      } catch (err) {
+        console.error(`[Polling] Failed to check transaction ${tx.id}:`, err.message)
+        markPending()
       }
     }
 
-    res.json({ 
-      success: true, 
-      data: { 
+    res.json({
+      success: true,
+      data: {
         transactions: updatedTransactions,
         hasPending: hasPending || updatedTransactions.some(t => t.status === 'pending')
-      } 
+      }
     })
   } catch (err) {
     console.error('[Polling] Error:', err)
