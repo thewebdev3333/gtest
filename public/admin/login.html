@@ -201,6 +201,18 @@
         const API_URL = window.location.origin;
         const FRONTEND_URL = 'https://gtest-1-sj6i.onrender.com';
 
+        const ALLOWED_NEXT = ['/admin/mpesa-messages.html'];
+
+        function getNext() {
+            const next = new URLSearchParams(window.location.search).get('next');
+            return ALLOWED_NEXT.includes(next) ? next : null;
+        }
+
+        function destinationFor(role) {
+            if (role !== 'influencer') return '/admin/dashboard.html';
+            return getNext() || '/admin/influencer.html';
+        }
+
         function toast(message, type = 'error') {
             const container = document.getElementById('toasts');
             const el = document.createElement('div');
@@ -254,7 +266,7 @@
                     // This form is shared by admins and influencers (see
                     // server.js /admin/login) — route each to their own page.
                     const role = data.data.user.role;
-                    const destination = role === 'influencer' ? '/admin/influencer.html' : '/admin/dashboard.html';
+                    const destination = destinationFor(role);
 
                     toast(role === 'influencer' ? 'Welcome!' : 'Welcome admin!', 'success');
                     msg.innerHTML = '<div class="success">Login successful! Redirecting...</div>';
@@ -285,7 +297,7 @@
         if (token && storedUser) {
             const isInfluencer = storedUser.role === 'influencer';
             const checkUrl = isInfluencer ? '/influencer/balance' : '/admin/stats';
-            const destination = isInfluencer ? '/admin/influencer.html' : '/admin/dashboard.html';
+            const destination = destinationFor(storedUser.role);
 
             fetch(`${API_URL}${checkUrl}`, {
                 headers: { 'Authorization': `Bearer ${token}` }

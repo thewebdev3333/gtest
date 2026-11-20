@@ -2,12 +2,13 @@
 const db = require('./database')
 const { getKycStatus } = require('./auth')
 const { initiatePayout } = require('./wallet')
+const { invalidateCachedRole } = require('./redis')
 
 // PostgREST never exposes the `auth` schema, so `auth.users` can't be
 // embedded or queried directly from here (that was the cause of the
 // 500s on /admin/kyc/pending, /admin/withdrawals/pending, /admin/users,
 // /admin/audit-log). Instead we look users up in `public.profiles`
-// (kept in sync by the signup trigger — see profiles.sql) and attach
+// (kept in sync by the signup trigger — see database.sql) and attach
 // flat `email` / `display_name` fields onto each row.
 async function attachProfiles(rows, userIdField) {
   if (!rows || rows.length === 0) return rows || []
@@ -309,6 +310,11 @@ async function setUserRole(req, res, next) {
       .from('user_roles')
       .upsert({ user_id: userId, role })
 
+    // The role cache is keyed by user id with a short TTL, so a stale
+    // entry would keep the old role alive for up to a minute. Drop it
+    // explicitly so the change takes effect immediately.
+    await invalidateCachedRole(userId)
+
     await db.supabase.from('admin_audit_log').insert({
       admin_id: req.user.id,
       action: 'set_user_role',
@@ -401,6 +407,15 @@ async function refreshExchangeRate(req, res, next) {
 }
 
 // ── Admin: All transactions & platform stats ───────────────────────
+
+async function getDailyStats(req, res, next) {
+  try {
+    const stats = await db.getDailyStats()
+    res.json({ success: true, data: stats })
+  } catch (err) {
+    next(err)
+  }
+}
 
 /**
  * GET /admin/transactions
@@ -569,6 +584,7 @@ module.exports = {
   getAuditLog,
   getAllTransactions,
   getStats,
+  getDailyStats,
   getInfluencerWithdrawals,
   markInfluencerWithdrawalSent,
   markInfluencerWithdrawalFailed,

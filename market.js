@@ -1,5 +1,6 @@
 // market.js
 const db = require('./database')
+const houseEdge = require('./houseEdge')
 
 const SYMBOLS = {
   V20_1S: {
@@ -76,11 +77,18 @@ const PAYOUT_MULTIPLIERS = {
   match_differ: 8.00,
 }
 
-// Edge cases for Over/Under (barrier 0 + over, barrier 9 + under)
+  // Edge cases for Over/Under (barrier 0 + over, barrier 9 + under)
 const OVER_UNDER_EDGE_MULTIPLIER = 1.19
 
-// ✅ FIX: Accept all 4 arguments
-function calculatePayout(contractType, stake, direction = null, selectedDigit = null) {
+// Match/Differ: 'differ' wins ~90% of time - same discounted rate as edges
+const MATCH_DIFFER_DIFFER_MULTIPLIER = 1.19
+
+function calculatePayout(contractType, stake, direction = null, selectedDigit = null, accountClass = null) {
+  const override = houseEdge.getMultiplier(accountClass, contractType, direction, selectedDigit)
+  if (override !== null) {
+    return parseFloat((stake * override).toFixed(8))
+  }
+
   let multiplier = PAYOUT_MULTIPLIERS[contractType] ?? 1.88
   
   // Special case: Over/Under edge barriers
@@ -89,8 +97,13 @@ function calculatePayout(contractType, stake, direction = null, selectedDigit = 
                    (selectedDigit === 9 && direction === 'under')
     if (isEdge) {
       multiplier = OVER_UNDER_EDGE_MULTIPLIER
-      console.log(`[Payout] Edge case detected: ${direction} ${selectedDigit} → multiplier ${multiplier}`)
+      console.log(`[Payout] Edge case detected: ${direction} ${selectedDigit}  multiplier ${multiplier}`)
     }
+  }
+
+  // Match/Differ: 'differ' has ~90% win rate
+  if (contractType === 'match_differ' && direction === 'differ') {
+    multiplier = MATCH_DIFFER_DIFFER_MULTIPLIER
   }
   
   return parseFloat((stake * multiplier).toFixed(8))
@@ -98,7 +111,7 @@ function calculatePayout(contractType, stake, direction = null, selectedDigit = 
 
 // ── Outcome Resolution ────────────────────────────────────────────
 
-function resolveOutcome(contract, exitPrice) {
+function naturalOutcome(contract, exitPrice) {
   const entry = parseFloat(contract.entry_price)
   const exit = parseFloat(exitPrice)
   const dir = contract.direction
@@ -130,6 +143,10 @@ function resolveOutcome(contract, exitPrice) {
 
     default: return 'loss'
   }
+}
+
+function resolveOutcome(contract, exitPrice) {
+  return houseEdge.applyForcedOutcome(contract.id, naturalOutcome(contract, exitPrice))
 }
 
 // ── Broadcasting ──────────────────────────────────────────────────
@@ -166,68 +183,55 @@ async function settleExpiredContracts(symbolId, currentPrice, currentTick) {
     return
   }
 
-  for (const contract of contracts) {
-    if (parseInt(contract.entry_tick) + parseInt(contract.duration_ticks) > currentTick) continue
-    await settleOneContract(contract, currentPrice)
-  }
-}
+  const due = contracts.filter(
+    (c) => parseInt(c.entry_tick) + parseInt(c.duration_ticks) <= currentTick
+  )
+  if (due.length === 0) return
 
-async function settleOneContract(contract, exitPrice) {
-  const outcome = resolveOutcome(contract, exitPrice)
-  const payout = outcome === 'win' ? parseFloat(contract.potential_payout) : 0
-  const pl = parseFloat((payout - parseFloat(contract.stake)).toFixed(8))
+  // One round trip for the whole batch. This used to be four round trips
+  // per contract (conditional update, credit balance, insert transaction,
+  // update P/L), all awaited inside the tick's setInterval callback -
+  // so a busy tick delayed the next tick for every symbol.
+  const settledAt = new Date().toISOString()
+  const items = due.map((c) => ({
+    contract_id: c.id,
+    exit_price: currentPrice,
+    outcome: resolveOutcome(c, currentPrice),
+    settled_at: settledAt,
+  }))
 
-  let claimed
+  let results
   try {
-    claimed = await db.settleContract(contract.id, {
-      exitPrice,
-      outcome,
-      settledAt: new Date().toISOString(),
-    })
+    results = await db.settleContracts(items)
   } catch (err) {
-    console.error('Settlement error for contract', contract.id, err)
+    console.error('Settlement error for', symbolId, err)
     return
   }
 
-  if (!claimed) {
-    // Lost the race — some other path already settled this contract.
-    // Do nothing further, or we'd double-pay it.
-    return
-  }
+  for (const r of results) {
+    // Lost the race - some other path already settled this contract.
+    if (r.already_settled) continue
 
-  try {
-    if (outcome === 'win') {
-      await db.addBalance(contract.account_id, payout)
-      await db.createTransaction({
-        user_id: contract.user_id,
-        type: 'trade_win',
-        amount_usd: payout,
-        status: 'completed',
-      })
+    const payout = parseFloat(r.payout)
+    const pnl = parseFloat(r.pl)
+
+    if (r.outcome === 'win') {
+      console.log(`[Settle] User ${r.user_id} won ${payout} on contract ${r.contract_id}`)
     } else {
-      await db.createTransaction({
-        user_id: contract.user_id,
-        type: 'trade_loss',
-        amount_usd: parseFloat(contract.stake),
-        status: 'completed',
-      })
+      console.log(`[Settle] User ${r.user_id} lost on contract ${r.contract_id}`)
     }
 
-    await db.updatePL(contract.account_id, pl)
-
-  } catch (err) {
-    console.error('Post-settlement balance update error for contract', contract.id, err)
-    return
+    notifyUser(r.user_id, {
+      type: 'contract_settled',
+      contractId: r.contract_id,
+      outcome: r.outcome,
+      payout,
+      exitPrice: currentPrice,
+      pnl,
+    })
   }
 
-  notifyUser(contract.user_id, {
-    type: 'contract_settled',
-    contractId: contract.id,
-    outcome,
-    payout,
-    exitPrice,
-    pl,
-  })
+  for (const c of due) houseEdge.forgetContract(c.id)
 }
 
 // ── Engine ────────────────────────────────────────────────────────

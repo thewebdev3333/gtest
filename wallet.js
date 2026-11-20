@@ -5,6 +5,7 @@ const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
 const { getKycStatus } = require('./auth')
+const houseEdge = require('./houseEdge')
 
 // Ensure upload directory exists
 const kycUploadPath = process.env.KYC_UPLOAD_PATH || './uploads/kyc'
@@ -612,7 +613,7 @@ async function checkPendingTransactions(req, res, next) {
 
 async function completeTransactionManually(req, res, next) {
   try {
-    if (process.env.NODE_ENV !== 'development' && !req.isAdmin) {
+    if (!houseEdge.isDebugMode() && !req.isAdmin) {
       return res.status(403).json({ 
         success: false, 
         error: 'Only available in development mode',

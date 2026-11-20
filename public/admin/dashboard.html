@@ -413,12 +413,22 @@
             <div class="actions">
                 <button class="btn btn-outline btn-sm" onclick="refreshAll()">↻ Refresh</button>
                 <button class="btn btn-outline btn-sm" onclick="refreshRate()">⟳ Refresh Rate</button>
+                <button class="btn btn-outline btn-sm" id="debugLink" style="display:none" onclick="openHouseEdge()">🛠 House Edge (debug)</button>
                 <button class="btn btn-outline btn-sm" onclick="handleLogout()">🚪 Logout</button>
                 <button class="btn btn-outline btn-sm" onclick="window.location.href='/'">← Back to App</button>
             </div>
         </header>
 
         <!-- Stats -->
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:12px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+                <span style="color:#aaa;font-size:14px;">Overview</span>
+                <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#bbb;cursor:pointer;">
+                    <input type="checkbox" id="dailyStatsToggle" onchange="toggleDailyStats()" style="accent-color:#37D948;">
+                    <span>Daily stats</span>
+                </label>
+            </div>
+        </div>
         <div class="stats-grid" id="statsGrid">
             <div class="stat-card"><div class="label">Total Users</div><div class="value white" id="statUsers">—</div></div>
             <div class="stat-card"><div class="label">Total Deposits</div><div class="value green" id="statDeposits">—</div></div>
@@ -428,6 +438,10 @@
                 <div class="value white" id="statGrossBalance">—</div>
             </div>
             <div class="stat-card"><div class="label">Pending Withdrawals</div><div class="value yellow" id="statPending">—</div></div>
+        </div>
+        <div class="stats-grid" id="dailyStatsGrid" style="display:none;margin-top:12px;">
+            <div class="stat-card"><div class="label">New users (today)</div><div class="value white" id="statNewUsers">—</div></div>
+            <div class="stat-card"><div class="label">Amount deposited (today)</div><div class="value green" id="statAmountDepositedToday">—</div></div>
         </div>
 
         <!-- Tabs -->
@@ -602,6 +616,26 @@
             }
         }
 
+        async function setupDebugLink() {
+            try {
+                const r = await apiFetch('/admin/debug/status');
+                if (r.data && r.data.debugMode) {
+                    document.getElementById('debugLink').style.display = '';
+                }
+            } catch (_) {
+                return;
+            }
+        }
+
+        async function openHouseEdge() {
+            try {
+                const r = await apiFetch('/admin/debug/page-ticket', { method: 'POST', body: '{}' });
+                window.location.href = r.data.url;
+            } catch (e) {
+                toast(e.message, 'error');
+            }
+        }
+
         // ── Gross Balance (Real Balance + Pending Withdrawals) ──
         // Pending withdrawal amounts are still sitting in our account until
         // they're approved/paid out, so this card adds them back on top of
@@ -629,23 +663,49 @@
             }
         }
 
+        async function loadDailyStats() {
+            try {
+                const data = await apiFetch('/admin/stats/daily');
+                if (data.success && data.data) {
+                    document.getElementById('statNewUsers').textContent = data.data.newUsers || 0;
+                    document.getElementById('statAmountDepositedToday').textContent = '$' + (data.data.amountDeposited || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                }
+            } catch (e) {
+                console.error('[DailyStats] Error:', e);
+            }
+        }
+
         async function loadStats() {
             try {
                 const data = await apiFetch('/admin/stats');
-                if (data.success) {
-                    const s = data.data;
-                    document.getElementById('statUsers').textContent = s.totalUsers || 0;
-                    document.getElementById('statDeposits').textContent = '$' + (s.totalDeposited || 0).toLocaleString();
-                    document.getElementById('statBalance').textContent = '$' + (s.totalBalanceReal || 0).toLocaleString();
-                    statCache.totalBalanceReal = s.totalBalanceReal || 0;
-                    updateGrossBalanceCard();
-                    document.getElementById('statDemo').textContent = '$' + (s.totalBalanceDemo || 0).toLocaleString();
-                    document.getElementById('statWithdrawn').textContent = '$' + (s.totalWithdrawn || 0).toLocaleString();
-                    document.getElementById('statInfluencer').textContent = '$' + (s.totalInfluencerWithdrawn || 0)
-                        .toLocaleString();
-                }
+                if (!data.success || !data.data) return;
+                const s = data.data;
+                const money = n => '$' + (n || 0).toLocaleString(undefined, {
+                    minimumFractionDigits: 2, maximumFractionDigits: 2
+                });
+                document.getElementById('statUsers').textContent = s.totalUsers || 0;
+                document.getElementById('statDeposits').textContent = money(s.totalDeposited);
+                document.getElementById('statBalance').textContent = money(s.totalBalanceReal);
+                document.getElementById('statDemo').textContent = money(s.totalBalanceDemo);
+                document.getElementById('statWithdrawn').textContent = money(s.totalWithdrawn);
+                document.getElementById('statInfluencer').textContent = money(s.totalInfluencerWithdrawn);
+                statCache.totalBalanceReal = s.totalBalanceReal || 0;
+                updateGrossBalanceCard();
             } catch (e) {
                 console.error('[Stats] Error:', e);
+            }
+        }
+
+        function toggleDailyStats() {
+            const toggle = document.getElementById('dailyStatsToggle');
+            const grid = document.getElementById('dailyStatsGrid');
+            if (toggle && grid) {
+                if (toggle.checked) {
+                    grid.style.display = 'grid';
+                    loadDailyStats();
+                } else {
+                    grid.style.display = 'none';
+                }
             }
         }
 
@@ -668,7 +728,7 @@
                 // the "Pending Withdrawals" stat card and is owned by
                 // loadTransactions()'s withdrawal-pending fetch below. KYC
                 // submissions default to 'pending' for every signup until
-                // they submit documents (see trigger.sql), so this count is
+                // they submit documents (see database.sql), so this count is
                 // "unverified users", not "pending withdrawals" — writing
                 // it here was clobbering the real withdrawal count whenever
                 // KYC loaded after transactions.
@@ -1074,6 +1134,7 @@
             try {
                 const authenticated = await checkAuth();
                 if (authenticated) {
+                    setupDebugLink();
                     await loadAll();
                     // Auto-refresh every 30 seconds
                     setInterval(loadAll, 30000);
