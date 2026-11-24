@@ -42,6 +42,15 @@ export const VOLATILITIES: { id: VolatilityId; name: string; vol: number }[] = [
   { id: "v25_1s", name: "Volatility 25 (1s) Index", vol: 0.25 },
 ];
 
+// Rolling window of real market ticks (current symbol only) used by the
+// last-digit stats on the trade page. Synthetic fallback prices are not
+// recorded here on purpose.
+const TICK_HISTORY_MAX = 1000;
+const appendTick = (history: number[], price: number): number[] =>
+  history.length >= TICK_HISTORY_MAX
+    ? [...history.slice(history.length - TICK_HISTORY_MAX + 1), price]
+    : [...history, price];
+
 export const CONTRACTS: { id: ContractType; label: string }[] = [
   { id: "rise_fall", label: "Rise/Fall" },
   { id: "over_under", label: "Over/Under" },
@@ -173,6 +182,17 @@ export interface AutoTradeResult {
   takeProfit?: number;
 }
 
+export interface AutoSetup {
+  contract: ContractType;
+  volatility: VolatilityId;
+  direction: Direction;
+  barrier?: number;
+  label?: string;
+  stake?: number;
+  stopLoss?: number;
+  takeProfit?: number;
+}
+
 interface AppState {
   theme: Theme;
   setTheme: (t: Theme) => void;
@@ -185,11 +205,11 @@ interface AppState {
   realBalance: number;
   deposit: (usd: number, to: AccountKind) => void;
   isAuthenticated: boolean;
-  user: { id: string; email: string; name: string } | null;
+  user: { id: string; email: string; name: string; displayName?: string } | null;
   // Populated from /auth/me (see fetchUserData). Null until the first
   // fetch resolves, so treat null as "unknown" rather than "regular user".
   role: 'user' | 'support' | 'admin' | 'tech' | 'influencer' | null;
-  setAuthenticated: (status: boolean, user?: { id: string; email: string; name: string }) => void;
+  setAuthenticated: (status: boolean, user?: { id: string; email: string; name: string; displayName?: string }) => void;
   logout: () => void;
   volatility: VolatilityId;
   setVolatility: (v: VolatilityId) => void;
@@ -197,6 +217,7 @@ interface AppState {
   setContract: (c: ContractType) => void;
   price: number;
   prevPrice: number;
+  tickHistory: number[];
   setPrice: (p: number) => void;
   resetPrice: (p: number) => void;
   trades: Trade[];
@@ -221,6 +242,9 @@ interface AppState {
   };
   showAutoTradeResult: (result: AutoTradeResult) => void;
   hideAutoTradeResult: () => void;
+  pendingAutoSetup: (AutoSetup & { id: number }) | null;
+  applyAutoSetup: (setup: AutoSetup) => void;
+  clearPendingAutoSetup: () => void;
   fetchUserData: () => Promise<void>;
   fetchBalances: () => Promise<void>;
   fetchExchangeRate: () => Promise<void>;
@@ -260,7 +284,7 @@ function savePrefs(s: AppState) {
   );
 }
 
-function loadAuth(): { isAuthenticated: boolean; user: { id: string; email: string; name: string } | null } {
+function loadAuth(): { isAuthenticated: boolean; user: { id: string; email: string; name: string; displayName?: string } | null } {
   if (typeof window === "undefined") return { isAuthenticated: false, user: null };
   try {
     return JSON.parse(sessionStorage.getItem(AUTH_KEY) || '{"isAuthenticated":false,"user":null}');
@@ -269,7 +293,7 @@ function loadAuth(): { isAuthenticated: boolean; user: { id: string; email: stri
   }
 }
 
-function saveAuth(isAuthenticated: boolean, user: { id: string; email: string; name: string } | null) {
+function saveAuth(isAuthenticated: boolean, user: { id: string; email: string; name: string; displayName?: string } | null) {
   if (typeof window === "undefined") return;
   sessionStorage.setItem(AUTH_KEY, JSON.stringify({ isAuthenticated, user }));
 }
@@ -376,7 +400,7 @@ export const useApp = create<AppState>((set, get) => {
         ws.unsubscribe(prev);
         console.log(`[Store] Unsubscribed from ${prev}`);
       }
-      set({ volatility: v });
+      set({ volatility: v, tickHistory: [] });
       if (ws && get().isConnected) {
         ws.subscribe(v);
         console.log(`[Store] Subscribed to ${v}`);
@@ -387,6 +411,7 @@ export const useApp = create<AppState>((set, get) => {
 
     price: 204.33,
     prevPrice: 204.33,
+    tickHistory: [],
     setPrice: (p) => set((s) => ({ price: p, prevPrice: s.price })),
     resetPrice: (p) => set({ price: p, prevPrice: p }),
 
@@ -420,7 +445,7 @@ export const useApp = create<AppState>((set, get) => {
         const response = await settleTrade(id, exitPrice, accountType);
 
         if (response.success) {
-          const { outcome, pnl, newBalance, accountType: creditedAccountType } = response.data;
+          const { outcome, pnl, newBalance, accountType: creditedAccountType, exitPrice: serverExitPrice } = response.data;
           const won = outcome === 'win';
           // ✅ FIX: use the account type the BACKEND says it credited
           // (derived server-side from contract.account_id), not whatever
@@ -428,8 +453,9 @@ export const useApp = create<AppState>((set, get) => {
           // updating the wrong local balance if the user switched
           // demo/real tabs while this trade was still open.
           const balKey = creditedAccountType === "demo" ? "demoBalance" : "realBalance";
+          const finalExitPrice = serverExitPrice ?? exitPrice;
 
-          const updatedTrade: Trade = { ...t, status: won ? "won" : "lost", exitPrice, pnl };
+          const updatedTrade: Trade = { ...t, status: won ? "won" : "lost", exitPrice: finalExitPrice, pnl };
 
           set((s) => ({
             trades: s.trades.map((x) => (x.id === id ? updatedTrade : x)),
@@ -530,6 +556,21 @@ export const useApp = create<AppState>((set, get) => {
 
     hideAutoTradeResult: () => {
       set({ autoTradeResult: { show: false, result: null } });
+    },
+
+    pendingAutoSetup: null,
+
+    applyAutoSetup: (setup) => {
+      set({ pendingAutoSetup: { ...setup, id: Date.now() + Math.random() } });
+      get().setVolatility(setup.volatility);
+      get().setContract(setup.contract);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("gwave:focus-auto-tab"));
+      }
+    },
+
+    clearPendingAutoSetup: () => {
+      set({ pendingAutoSetup: null });
     },
 
     startAutoTrade: (config) => {
@@ -869,7 +910,7 @@ export const useApp = create<AppState>((set, get) => {
             user: {
               id: user.id,
               email: user.email || '',
-              name: user.name || user.email || 'User',
+              name: user.displayName || user.name || user.email || 'User',
             },
             role: role ?? null,
             kycStatus: kycStatus as any,
@@ -972,55 +1013,59 @@ export const useApp = create<AppState>((set, get) => {
         wsInstance = null;
       }
 
+      set({ isConnected: false });
+
       const token = getToken();
-      wsInstance = new MarketWebSocket(token || undefined);
-      
-      wsInstance.on('tick', (data) => {
+      const instance = new MarketWebSocket(token || undefined);
+      wsInstance = instance;
+      const isCurrent = () => wsInstance === instance;
+
+      instance.on('tick', (data) => {
+        if (!isCurrent()) return;
         if (data.price && data.symbol === get().volatility) {
           set((s) => ({
             price: data.price,
             prevPrice: s.price,
+            tickHistory: appendTick(s.tickHistory, data.price),
           }));
         }
       });
-      
-     wsInstance.on('contract_settled', (data) => {
-  console.log('[WS] Contract settled:', data);
 
-  // ✅ Update the specific trade immediately using this payload, for
-  // ANY open trade matching this contract — not just the one tracked by
-  // auto-trade. This is the fast path; without it, closing a manual
-  // trade fell back on tick-engine.ts's ~3s grace-window REST poll.
-  const existing = get().trades.find(t => t.id === data.contractId);
-  let updatedTrade: Trade | undefined;
-  if (existing && existing.status === 'open') {
-    updatedTrade = {
-      ...existing,
-      status: data.outcome === 'win' ? 'won' : 'lost',
-      exitPrice: data.exitPrice,
-      pnl: data.pnl,
-    };
-    set((s) => ({
-      trades: s.trades.map((t) => (t.id === data.contractId ? updatedTrade! : t)),
-    }));
-  }
+      instance.on('contract_settled', (data) => {
+        if (!isCurrent()) return;
+        console.log('[WS] Contract settled:', data);
 
-  get().syncTrades();
-  get().fetchBalances();
+        const existing = get().trades.find(t => t.id === data.contractId);
+        let updatedTrade: Trade | undefined;
+        if (existing && existing.status === 'open') {
+          updatedTrade = {
+            ...existing,
+            status: data.outcome === 'win' ? 'won' : 'lost',
+            exitPrice: data.exitPrice,
+            pnl: data.pnl ?? data.pl,
+          };
+          set((s) => ({
+            trades: s.trades.map((t) => (t.id === data.contractId ? updatedTrade! : t)),
+          }));
+        }
 
-  const autoTrade = get().autoTrade;
-  if (
-    autoTrade.isRunning &&
-    data.contractId === autoTrade.currentContractId &&
-    updatedTrade &&
-    !autoSettledContractIds.has(data.contractId)
-  ) {
-    autoSettledContractIds.add(data.contractId);
-    get().handleAutoTradeSettlement(updatedTrade);
-  }
-});
+        get().syncTrades();
+        get().fetchBalances();
 
-      wsInstance.on('transaction_updated', (data) => {
+        const autoTrade = get().autoTrade;
+        if (
+          autoTrade.isRunning &&
+          data.contractId === autoTrade.currentContractId &&
+          updatedTrade &&
+          !autoSettledContractIds.has(data.contractId)
+        ) {
+          autoSettledContractIds.add(data.contractId);
+          get().handleAutoTradeSettlement(updatedTrade);
+        }
+      });
+
+      instance.on('transaction_updated', (data) => {
+        if (!isCurrent()) return;
         console.log('[WS] Transaction updated:', data);
         get().fetchBalances();
         if (data.status === 'completed') {
@@ -1037,22 +1082,24 @@ export const useApp = create<AppState>((set, get) => {
           }
         }
       });
-      
-      wsInstance.connect();
-      
-      wsInstance.on('connected', () => {
+
+      instance.connect();
+
+      instance.on('connected', () => {
+        if (!isCurrent()) return;
         set({ isConnected: true });
         const symbol = get().volatility;
-        wsInstance?.subscribe(symbol);
+        instance.subscribe(symbol);
         console.log(`[Store] WebSocket connected, subscribed to ${symbol}`);
       });
-      
-      wsInstance.on('disconnected', () => {
+
+      instance.on('disconnected', () => {
+        if (!isCurrent()) return;
         set({ isConnected: false });
         console.log('[Store] WebSocket disconnected');
       });
-      
-      set({ ws: wsInstance });
+
+      set({ ws: instance });
     },
 
     disconnectWebSocket: () => {

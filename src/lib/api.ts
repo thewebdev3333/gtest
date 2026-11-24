@@ -85,6 +85,11 @@ export interface User {
   id: string
   email: string
   name?: string
+  displayName?: string
+  role?: string
+  accountType?: string
+  demoBalance?: number
+  realBalance?: number
 }
 
 export interface AuthResponse {
@@ -482,6 +487,7 @@ export interface SettleTradeResponse {
   data: {
     contractId: string
     outcome: 'win' | 'loss'
+    exitPrice?: number
     pnl: number
     newBalance: number
     accountType: 'demo' | 'real'
@@ -496,7 +502,7 @@ export async function settleTrade(
 ): Promise<SettleTradeResponse> {
   return apiFetch<SettleTradeResponse>(`/trade/settle/${contractId}`, {
     method: 'POST',
-    body: JSON.stringify({ exitPrice, accountType }),
+    body: JSON.stringify({}),
   })
 }
 
@@ -512,12 +518,15 @@ export class MarketWebSocket {
   private subscribedSymbols: Set<string> = new Set()
   private token: string | undefined
   private userId: string | null = null
+  private intentionalClose = false
 
   constructor(token?: string) {
     this.token = token
   }
 
   connect() {
+    this.detachSocket()
+    this.intentionalClose = false
     let url = WS_URL
     if (this.token) {
       url = `${WS_URL}?token=${this.token}`
@@ -548,7 +557,7 @@ export class MarketWebSocket {
     this.ws.onclose = (event) => {
       console.log('[WS] Disconnected', event.code, event.reason)
       this.emit('disconnected', { disconnected: true, code: event.code })
-      if (event.code !== 1000) {
+      if (!this.intentionalClose && event.code !== 1000) {
         this.reconnect()
       }
     }
@@ -675,17 +684,26 @@ export class MarketWebSocket {
     }
   }
 
+  private detachSocket() {
+    const sock = this.ws
+    if (!sock) return
+    sock.onopen = null
+    sock.onmessage = null
+    sock.onclose = null
+    sock.onerror = null
+    if (sock.readyState === WebSocket.OPEN || sock.readyState === WebSocket.CONNECTING) {
+      try { sock.close(1000, 'Disconnected by client') } catch { void sock }
+    }
+    this.ws = null
+  }
+
   disconnect() {
+    this.intentionalClose = true
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
-    if (this.ws) {
-      if (this.ws.readyState === WebSocket.OPEN) {
-        this.ws.close(1000, 'Disconnected by client')
-      }
-      this.ws = null
-    }
+    this.detachSocket()
     this.subscribedSymbols.clear()
     console.log('[WS] Disconnected by client')
   }

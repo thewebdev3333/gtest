@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, User } from "lucide-react";
+import { Brain, ChevronDown, User } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { useApp, formatMoney, type AccountKind, type Currency } from "@/lib/store";
 import {
@@ -12,13 +12,22 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { DepositModal } from "@/components/trade/DepositModal";
+import { EntryScannerModal } from "@/components/trade/EntryScannerModal";
 import GLogo from "@/components/layout/GLogo";
 import { toast } from "sonner";
 
 export function TopBar() {
   const navigate = useNavigate();
   const [depositOpen, setDepositOpen] = useState(false);
-  
+  const [scannerOpen, setScannerOpen] = useState(false);
+
+  useEffect(() => {
+    const handler = () => setDepositOpen(true);
+    window.addEventListener("open-deposit", handler as EventListener);
+    return () =>
+      window.removeEventListener("open-deposit", handler as EventListener);
+  }, []);
+
   const account = useApp((s) => s.account);
   const setAccount = useApp((s) => s.setAccount);
   const demoBalance = useApp((s) => s.demoBalance);
@@ -51,6 +60,16 @@ export function TopBar() {
       </div>
 
       <div className="ml-auto flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setScannerOpen(true)}
+          className="flex h-9 w-9 items-center justify-center rounded-full bg-elevated text-muted-foreground hover:text-foreground"
+          aria-label="Open AI Entry Scanner"
+          title="AI Entry Scanner"
+        >
+          <Brain className="h-4 w-4" />
+        </button>
+
         <div className="hidden md:flex h-9 w-9 items-center justify-center rounded-full bg-elevated text-muted-foreground">
           <User className="h-4 w-4" />
         </div>
@@ -130,6 +149,7 @@ export function TopBar() {
         )}
       </div>
       <DepositModal open={depositOpen} onOpenChange={setDepositOpen} />
+      <EntryScannerModal open={scannerOpen} onOpenChange={setScannerOpen} />
     </header>
   );
 }

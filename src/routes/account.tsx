@@ -18,7 +18,7 @@ export const Route = createFileRoute("/account")({
 function AccountPage() {
   const user = useApp((s) => s.user);
   const fetchUserData = useApp((s) => s.fetchUserData);
-  const [name, setName] = useState(user?.name || "");
+  const [name, setName] = useState(user?.name || user?.displayName || "");
   const [email, setEmail] = useState(user?.email || "");
   const [kycStatus, setKycStatus] = useState<'none' | 'pending' | 'approved' | 'rejected'>('none');
   const [twofa, setTwofa] = useState(false);
@@ -28,6 +28,12 @@ function AccountPage() {
   useEffect(() => {
     loadKYCStatus();
   }, []);
+
+  useEffect(() => {
+    if (user?.name || user?.displayName) {
+      setName(user.name || user.displayName || "");
+    }
+  }, [user?.name, user?.displayName]);
 
   const loadKYCStatus = async () => {
     try {
